@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cocotbext-i3c"
+dynamic = ["version"]
+requires-python = ">=3.11"
+dependencies = [
+    "cocotb >= 1.8.1"
+]
+
+authors = [
+    {name="Krzysztof Boroński, Michał Czyż, Antmicro"},
+]
+
+description = "I3C simulation models for CocoTB"
+readme = "README.md"
+
+keywords = ["cocotb", "i3c"]
+
+[project.urls]
+Source = "https://github.com/antmicro/cocotbext-i3c"
+Tracker = "https://github.com/antmicro/cocotbext-i3c/issues"
+Changelog = "https://github.com/antmicro/cocotbext-i3c/releases"
+
+[tool.setuptools.dynamic]
+version = {attr = "cocotbext_i3c.__about__.__version__"}
