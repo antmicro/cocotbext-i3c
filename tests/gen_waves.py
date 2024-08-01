@@ -6,14 +6,11 @@ SPDX-License-Identifier: Apache-2.0
 """
 
 import logging
-import os
-
 
 import cocotb
 from cocotb.triggers import Timer
 
 from cocotbext_i3c.i3c_controller import I3cController, I3cXferMode
-from cocotb.types import Logic
 
 
 class TB:
@@ -30,21 +27,21 @@ class TB:
             scl_o=dut.scl_i,
             debug_state_o=dut.debug_state_i,
             speed=12.5e6,
-            silent=False
+            silent=False,
         )
 
 
 @cocotb.test()
 async def test_i3c(dut):
 
-    dut.pull_sda_low_i.value = 0;
+    dut.pull_sda_low_i.value = 0
 
     tb = TB(dut)
 
     await Timer(100, "ns")
 
     # Private write
-    await tb.i3c_controller.i3c_write(0x50, [0xaa])
+    await tb.i3c_controller.i3c_write(0x50, [0xAA])
 
     await Timer(300, "ns")
 
@@ -73,15 +70,14 @@ async def test_i3c(dut):
     await Timer(300, "ns")
 
     # Broadcasted SETMRL CCC
-    await tb.i3c_controller.i3c_ccc_write(0xA, broadcast_data=[0xaa, 0xbb])
+    await tb.i3c_controller.i3c_ccc_write(0xA, broadcast_data=[0xAA, 0xBB])
 
     await Timer(300, "ns")
 
     # Directed SETMRL CCC @ 0x50 and 0x51
-    await tb.i3c_controller.i3c_ccc_write(0x8A, directed_data=[
-        (0x50, [0xaa, 0xbb]),
-        (0x51, [0xff, 0x00])
-    ])
+    await tb.i3c_controller.i3c_ccc_write(
+        0x8A, directed_data=[(0x50, [0xAA, 0xBB]), (0x51, [0xFF, 0x00])]
+    )
 
     await Timer(300, "ns")
 

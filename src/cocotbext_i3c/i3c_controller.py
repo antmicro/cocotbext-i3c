@@ -3,12 +3,14 @@ Copyright (c) 2024 Antmicro <www.antmicro.com>
 SPDX-License-Identifier: Apache-2.0
 """
 
-from dataclasses import dataclass
 import logging
+from dataclasses import dataclass
 from enum import Enum, IntEnum
 from typing import Any, Iterable, Optional
-from cocotb.triggers import Timer
+
 from cocotb.handle import ModifiableObject
+from cocotb.triggers import Timer
+
 
 class I3cState(IntEnum):
     FREE = 0
@@ -23,29 +25,31 @@ class I3cState(IntEnum):
     CCC = 9
     STOP = 10
 
+
 @dataclass
 class I3cTimings:
     # Minimum timings, push-pull mode (ns)
-    thigh_d: float = 32.0      # High Period of SCL Clock (for Pure Bus)
-    tlow_d: float = 32.0       # SCL Clock Low Period
-    tcas: float = 38.4         # Clock After START (S) Condition
-    tcbp: float = 19.2         # Clock Before STOP (P) Condition
-    tcbsr: float = 19.2        # Clock Before Repeated START (Sr) Condition
-    tcasr: float = 19.2        # Clock After Repeated START (Sr) Condition
+    thigh_d: float = 32.0  # High Period of SCL Clock (for Pure Bus)
+    tlow_d: float = 32.0  # SCL Clock Low Period
+    tcas: float = 38.4  # Clock After START (S) Condition
+    tcbp: float = 19.2  # Clock Before STOP (P) Condition
+    tcbsr: float = 19.2  # Clock Before Repeated START (Sr) Condition
+    tcasr: float = 19.2  # Clock After Repeated START (Sr) Condition
     # NOTE: tlow_od is excluded because this timing is there only to give the pull-up
     # resitor enough time to pull the SDA line up - this is relevant only in case of
     # real hardware or analog circuit simulations.
-    #tlow_od: float = 200.0     # Low Period of SCL Clock (Open Drain)
+    # tlow_od: float = 200.0     # Low Period of SCL Clock (Open Drain)
     # TODO: This timing is used to allow I3C devices to disable I2C Spike filter
     # and should be used for an initial broadcast
-    #thigh_init: float = 200.0  # High Period of SCL Clock (for First Broadcast Address)
-    tfree: float = 38.4        # Bus Free condition (for Pure bus)
+    # thigh_init: float = 200.0  # High Period of SCL Clock (for First Broadcast Address)
+    tfree: float = 38.4  # Bus Free condition (for Pure bus)
     # Bus Available and Bus Idle conditions are of no concern for this model
     # they matter only for target-issued xfers and hot-join events.
-    tsu_od: float = 3.0        # Open-drain set-up time
-    tsupp: float = 3.0         # SDA Set-up time
-    thd: float = 6.0           # SDA Hold time
-    tsco: float = 12.0         # Clock in to Data Out for Target (max)
+    tsu_od: float = 3.0  # Open-drain set-up time
+    tsupp: float = 3.0  # SDA Set-up time
+    thd: float = 6.0  # SDA Hold time
+    tsco: float = 12.0  # Clock in to Data Out for Target (max)
+
 
 class I3cXferMode(Enum):
     PRIVATE = 0
@@ -54,11 +58,14 @@ class I3cXferMode(Enum):
     @property
     def name(self) -> str:
         match self:
-            case I3cXferMode.PRIVATE: return "Private"
-            case I3cXferMode.LEGACY_I2C: return "Legacy I2C"
+            case I3cXferMode.PRIVATE:
+                return "Private"
+            case I3cXferMode.LEGACY_I2C:
+                return "Legacy I2C"
+
 
 class I3cController:
-    RSVD_BYTE: int = 0x7e
+    RSVD_BYTE: int = 0x7E
     FULL_SPEED: float = 12.5e6
 
     def __init__(
@@ -122,17 +129,21 @@ class I3cController:
         self._state = I3cState.FREE
 
         self.log_info("I3C Controller configuration:")
-        self.log_info(f"  Rate: {self.speed / 1000.0}kHz "
-                    f"({100.0 * self.speed / I3cController.FULL_SPEED}%)")
-        self.log_info( "  Timings:")
+        self.log_info(
+            f"  Rate: {self.speed / 1000.0}kHz "
+            f"({100.0 * self.speed / I3cController.FULL_SPEED}%)"
+        )
+        self.log_info("  Timings:")
         self.log_info(f"    SCL Clock High Period: {scaled_timing(timings.thigh_d)}ns")
         self.log_info(f"    SCL Clock Low Period: {scaled_timing(timings.tlow_d)}ns")
         self.log_info(f"    Clock After START (S) Condition: {scaled_timing(timings.tcas)}ns")
         self.log_info(f"    Clock Before STOP (P) Condition: {scaled_timing(timings.tcbp)}ns")
-        self.log_info( "    Clock Before Repeated START (Sr) Condition: "
-                      f"{scaled_timing(timings.tcbsr)}ns")
-        self.log_info( "    Clock After Repeated START (Sr) Condition: "
-                      f"{scaled_timing(timings.tcasr)}ns")
+        self.log_info(
+            "    Clock Before Repeated START (Sr) Condition: " f"{scaled_timing(timings.tcbsr)}ns"
+        )
+        self.log_info(
+            "    Clock After Repeated START (Sr) Condition: " f"{scaled_timing(timings.tcasr)}ns"
+        )
         self.log_info(f"    Bus Free condition: {scaled_timing(timings.tfree)}ns")
         self.log_info(f"    Open-drain set-up time: {scaled_timing(timings.tsu_od)}ns")
         self.log_info(f"    SDA Set-up time (Push-Pull): {scaled_timing(timings.tsupp)}ns")
@@ -140,7 +151,8 @@ class I3cController:
         self.log_info(f"    Clock in to Data Out for Target: {scaled_timing(timings.tsco)}ns")
 
     def log_info(self, *args):
-        if self.silent: return
+        if self.silent:
+            return
         self.log.info(*args)
 
     @property
@@ -208,7 +220,8 @@ class I3cController:
             return
 
         self.scl = 0
-        if self.hold_data: await self.thd
+        if self.hold_data:
+            await self.thd
         self.sda = 0
         await self.remaining_tlow
         self.scl = 1
@@ -224,7 +237,8 @@ class I3cController:
             self.send_start()
 
         self.scl = 0
-        if self.hold_data: await self.thd
+        if self.hold_data:
+            await self.thd
         self.sda = bool(b)
         await self.remaining_tlow
         self.scl = 1
@@ -236,7 +250,8 @@ class I3cController:
             self.send_start()
 
         self.scl = 0
-        if self.hold_data: await self.thd
+        if self.hold_data:
+            await self.thd
         self.sda = 1
         await self.remaining_tlow
         if self.sda_i is None:
@@ -307,12 +322,12 @@ class I3cController:
         await self.tlow_d_minus_tsco
         # At this point target should set SDA to High-Z.
         self.scl = 1
-        if eod: # Target requests end-of-data
+        if eod:  # Target requests end-of-data
             self.sda = 0
             self.hold_data = False
             await self.thigh_d
             # This should be followed by a stop signal: self.send_stop
-        elif request_end: # Controller requests end-of-data
+        elif request_end:  # Controller requests end-of-data
             # This is basically RS and should be followed by a stop signal: self.send_stop
             await self.tcbsr
             self.sda = 0
@@ -322,7 +337,6 @@ class I3cController:
             await self.thigh_d
 
         return eod
-
 
     async def recv_byte_t_bit(self, stop: bool) -> tuple[int, bool]:
         b = 0
@@ -346,14 +360,20 @@ class I3cController:
 
     async def recv_until_eod_tbit(self, buf: bytearray, count: int) -> None:
         for i in range(count):
-            (byte, stop) = await self.recv_byte_t_bit(stop = (i == count - 1))
+            (byte, stop) = await self.recv_byte_t_bit(stop=(i == count - 1))
             self.log_info(f"I3C: read byte {hex(byte)}, idx={i}")
             buf.append(byte)
-            if stop: return
+            if stop:
+                return
 
-    async def i3c_write(self, addr: int, data: Iterable[int], stop: bool = True,
-                        mode: I3cXferMode = I3cXferMode.PRIVATE) -> None:
-        """ I3C Private Write transfer """
+    async def i3c_write(
+        self,
+        addr: int,
+        data: Iterable[int],
+        stop: bool = True,
+        mode: I3cXferMode = I3cXferMode.PRIVATE,
+    ) -> None:
+        """I3C Private Write transfer"""
         self.log_info(f"I3C: Write data ({mode.name}) {data} @ {hex(addr)}")
         await self.send_start()
         await self.write_addr_header(I3cController.RSVD_BYTE)
@@ -362,15 +382,19 @@ class I3cController:
 
         for i, d in enumerate(data):
             match mode:
-                case I3cXferMode.PRIVATE: await self.send_byte_tbit(d)
-                case I3cXferMode.LEGACY_I2C: await self.send_byte(d)
+                case I3cXferMode.PRIVATE:
+                    await self.send_byte_tbit(d)
+                case I3cXferMode.LEGACY_I2C:
+                    await self.send_byte(d)
             self.log_info(f"I3C: wrote byte {hex(d)}, idx={i}")
 
-        if stop: await self.send_stop()
+        if stop:
+            await self.send_stop()
 
-    async def i3c_read(self, addr: int, count: int, stop: bool = True,
-                       mode: I3cXferMode = I3cXferMode.PRIVATE) -> bytearray:
-        """ I3C Private Read transfer """
+    async def i3c_read(
+        self, addr: int, count: int, stop: bool = True, mode: I3cXferMode = I3cXferMode.PRIVATE
+    ) -> bytearray:
+        """I3C Private Read transfer"""
         data = bytearray()
         self.log_info(f"I3C: Read data ({mode.name}) @ {hex(addr)}")
 
@@ -379,21 +403,26 @@ class I3cController:
         await self.send_start()
         await self.write_addr_header(addr, read=True)
         match mode:
-            case I3cXferMode.PRIVATE: await self.recv_until_eod_tbit(data, count)
+            case I3cXferMode.PRIVATE:
+                await self.recv_until_eod_tbit(data, count)
             case I3cXferMode.LEGACY_I2C:
                 for i in range(count):
                     data.append(await self.recv_byte(i == count - 1))
-        if stop: await self.send_stop()
+        if stop:
+            await self.send_stop()
 
         return data
 
-    async def i3c_ccc_write(self, ccc: int,
-                            broadcast_data: Optional[Iterable[int]] = None,
-                            directed_data: Optional[Iterable[tuple[int, Iterable[int]]]] = None,
-                            defining_byte: Optional[int] = None,
-                            stop: bool = True) -> None:
-        """ Issue CCC Write frame. For directed CCCs use an iterable of address-data tuples"""
-        is_broadcast = ccc <= 0x7f
+    async def i3c_ccc_write(
+        self,
+        ccc: int,
+        broadcast_data: Optional[Iterable[int]] = None,
+        directed_data: Optional[Iterable[tuple[int, Iterable[int]]]] = None,
+        defining_byte: Optional[int] = None,
+        stop: bool = True,
+    ) -> None:
+        """Issue CCC Write frame. For directed CCCs use an iterable of address-data tuples"""
+        is_broadcast = ccc <= 0x7F
 
         log_data = broadcast_data if is_broadcast else directed_data
         if is_broadcast:
@@ -424,9 +453,15 @@ class I3cController:
         if stop:
             await self.send_stop()
 
-    async def i3c_ccc_read(self, ccc: int, addr: int, count: int,
-                           defining_byte: Optional[int] = None, stop: bool = True) -> bytearray:
-        """ Issue CCC Read frame. For directed CCCs use an iterable of address-data tuples"""
+    async def i3c_ccc_read(
+        self,
+        ccc: int,
+        addr: int,
+        count: int,
+        defining_byte: Optional[int] = None,
+        stop: bool = True,
+    ) -> bytearray:
+        """Issue CCC Read frame. For directed CCCs use an iterable of address-data tuples"""
         data = bytearray()
         self.log_info(f"I3C: CCC {hex(ccc)} RD (Directed @ {hex(addr)})")
 
