@@ -191,12 +191,14 @@ class I3cController:
 
     async def send_start(self) -> None:
         if self.bus_active:
+            clock_after_data_t = self.tcasr
             self._state = I3cState.RS
             self.scl = 0
             await self.thd
             self.sda = 1
             await self.tlow_d_minus_thd
         else:
+            clock_after_data_t = self.tcas
             self._state = I3cState.START
 
         self.sda = 1
@@ -207,7 +209,7 @@ class I3cController:
         await self.tcbsr
 
         self.sda = 0
-        await (self.tcas if not self.bus_active else self.tcasr)
+        await clock_after_data_t
         self.scl = 0
         await self.tcasr
 
