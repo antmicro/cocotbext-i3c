@@ -4,51 +4,19 @@ SPDX-License-Identifier: Apache-2.0
 """
 
 import logging
-from dataclasses import dataclass
-from enum import Enum, IntEnum
+from enum import Enum
 from typing import Any, Iterable, Optional
 
 from cocotb.handle import ModifiableObject
 from cocotb.triggers import Timer
 
-
-class I3cState(IntEnum):
-    FREE = 0
-    START = 1
-    ADDR_SEND = 2
-    DATA_SEND = 3
-    DATA_RECV = 4
-    ACK = 5
-    RS = 6
-    TBIT_WR = 7
-    TBIT_RD = 8
-    CCC = 9
-    STOP = 10
-
-
-@dataclass
-class I3cTimings:
-    # Minimum timings, push-pull mode (ns)
-    thigh_d: float = 32.0  # High Period of SCL Clock (for Pure Bus)
-    tlow_d: float = 32.0  # SCL Clock Low Period
-    tcas: float = 38.4  # Clock After START (S) Condition
-    tcbp: float = 19.2  # Clock Before STOP (P) Condition
-    tcbsr: float = 19.2  # Clock Before Repeated START (Sr) Condition
-    tcasr: float = 19.2  # Clock After Repeated START (Sr) Condition
-    # NOTE: tlow_od is excluded because this timing is there only to give the pull-up
-    # resitor enough time to pull the SDA line up - this is relevant only in case of
-    # real hardware or analog circuit simulations.
-    # tlow_od: float = 200.0     # Low Period of SCL Clock (Open Drain)
-    # TODO: This timing is used to allow I3C devices to disable I2C Spike filter
-    # and should be used for an initial broadcast
-    # thigh_init: float = 200.0  # High Period of SCL Clock (for First Broadcast Address)
-    tfree: float = 38.4  # Bus Free condition (for Pure bus)
-    # Bus Available and Bus Idle conditions are of no concern for this model
-    # they matter only for target-issued xfers and hot-join events.
-    tsu_od: float = 3.0  # Open-drain set-up time
-    tsupp: float = 3.0  # SDA Set-up time
-    thd: float = 6.0  # SDA Hold time
-    tsco: float = 12.0  # Clock in to Data Out for Target (max)
+from .common import (
+    I3C_RSVD_BYTE,
+    I3cControllerTimings,
+    I3cState,
+    calculate_tbit,
+    report_config,
+)
 
 
 class I3cXferMode(Enum):
@@ -65,7 +33,6 @@ class I3cXferMode(Enum):
 
 
 class I3cController:
-    RSVD_BYTE: int = 0x7E
     FULL_SPEED: float = 12.5e6
 
     def __init__(
@@ -75,7 +42,7 @@ class I3cController:
         scl_i: ModifiableObject,
         scl_o: ModifiableObject,
         debug_state_o: Optional[ModifiableObject] = None,
-        timings: Optional[I3cTimings] = None,
+        timings: Optional[I3cControllerTimings] = None,
         speed: float = FULL_SPEED,
         silent=True,
         *args,
@@ -92,7 +59,7 @@ class I3cController:
         self.silent = silent
 
         if timings is None:
-            timings = I3cTimings()
+            timings = I3cControllerTimings()
 
         def scaled_timing(period_ns: float) -> float:
             return (12.5e6 / speed) * period_ns
@@ -128,27 +95,7 @@ class I3cController:
         self._state_ = I3cState.FREE
         self._state = I3cState.FREE
 
-        self.log_info("I3C Controller configuration:")
-        self.log_info(
-            f"  Rate: {self.speed / 1000.0}kHz "
-            f"({100.0 * self.speed / I3cController.FULL_SPEED}%)"
-        )
-        self.log_info("  Timings:")
-        self.log_info(f"    SCL Clock High Period: {scaled_timing(timings.thigh_d)}ns")
-        self.log_info(f"    SCL Clock Low Period: {scaled_timing(timings.tlow_d)}ns")
-        self.log_info(f"    Clock After START (S) Condition: {scaled_timing(timings.tcas)}ns")
-        self.log_info(f"    Clock Before STOP (P) Condition: {scaled_timing(timings.tcbp)}ns")
-        self.log_info(
-            "    Clock Before Repeated START (Sr) Condition: " f"{scaled_timing(timings.tcbsr)}ns"
-        )
-        self.log_info(
-            "    Clock After Repeated START (Sr) Condition: " f"{scaled_timing(timings.tcasr)}ns"
-        )
-        self.log_info(f"    Bus Free condition: {scaled_timing(timings.tfree)}ns")
-        self.log_info(f"    Open-drain set-up time: {scaled_timing(timings.tsu_od)}ns")
-        self.log_info(f"    SDA Set-up time (Push-Pull): {scaled_timing(timings.tsupp)}ns")
-        self.log_info(f"    SDA Hold time (Push-Pull): {scaled_timing(timings.thd)}ns")
-        self.log_info(f"    Clock in to Data Out for Target: {scaled_timing(timings.tsco)}ns")
+        report_config(self.speed, timings, lambda x: self.log_info(x))
 
     def log_info(self, *args):
         if self.silent:
@@ -285,7 +232,7 @@ class I3cController:
         return b
 
     async def send_byte(self, b: int, addr: bool = False) -> bool:
-        self._state = I3cState.ADDR_SEND if addr else I3cState.DATA_SEND
+        self._state = I3cState.ADDR if addr else I3cState.DATA_WR
         for i in range(8):
             await self.send_bit(b & (1 << 7 - i))
         self._state = I3cState.ACK
@@ -293,29 +240,21 @@ class I3cController:
 
     async def recv_byte(self, ack: bool) -> int:
         b = 0
-        self._state = I3cState.DATA_RECV
+        self._state = I3cState.DATA_RD
         for _ in range(8):
             b = (b << 1) | await self.recv_bit()
         self._state = I3cState.ACK
         await self.send_bit(ack)
         return b
 
-    @staticmethod
-    def calculate_tbit(value: int) -> bool:
-        tbit = True
-        while value != 0:
-            if (value & 1) != 0:
-                tbit = not tbit
-            value >>= 1
-        return tbit
-
     async def send_byte_tbit(self, b: int) -> None:
-        self._state = I3cState.DATA_SEND
+        self.log_info(f"Controller:::Send byte {b}")
+        self._state = I3cState.DATA_WR
         for i in range(8):
             await self.send_bit(bool(b & (1 << (7 - i))))
         # Send T-Bit
         self._state = I3cState.TBIT_WR
-        await self.send_bit(I3cController.calculate_tbit(b))
+        await self.send_bit(calculate_tbit(b))
 
     async def tbit_eod(self, request_end: bool) -> bool:
         self.scl = 0
@@ -342,7 +281,7 @@ class I3cController:
 
     async def recv_byte_t_bit(self, stop: bool) -> tuple[int, bool]:
         b = 0
-        self._state = I3cState.DATA_RECV
+        self._state = I3cState.DATA_RD
         for _ in range(8):
             b = (b << 1) | (1 if await self.recv_bit() else 0)
         self._state = I3cState.TBIT_RD
@@ -350,7 +289,7 @@ class I3cController:
         return (b, tgt_eod | stop)
 
     async def write_addr_header(self, addr: int, read: bool = False) -> None:
-        if addr == I3cController.RSVD_BYTE:
+        if addr == I3C_RSVD_BYTE:
             self.log_info("Address Header:::Reserved I3C Address Header 0x%02x", addr)
         else:
             self.log_info("Address Header:::Address Header to device at I3C address 0x%02x", addr)
@@ -378,7 +317,7 @@ class I3cController:
         """I3C Private Write transfer"""
         self.log_info(f"I3C: Write data ({mode.name}) {data} @ {hex(addr)}")
         await self.send_start()
-        await self.write_addr_header(I3cController.RSVD_BYTE)
+        await self.write_addr_header(I3C_RSVD_BYTE)
         await self.send_start()
         await self.write_addr_header(addr)
 
@@ -401,7 +340,7 @@ class I3cController:
         self.log_info(f"I3C: Read data ({mode.name}) @ {hex(addr)}")
 
         await self.send_start()
-        await self.write_addr_header(I3cController.RSVD_BYTE)
+        await self.write_addr_header(I3C_RSVD_BYTE)
         await self.send_start()
         await self.write_addr_header(addr, read=True)
         match mode:
@@ -433,7 +372,7 @@ class I3cController:
             self.log_info(f"I3C: CCC {hex(ccc)} WR (Directed): {log_data}")
 
         await self.send_start()
-        await self.write_addr_header(I3cController.RSVD_BYTE)
+        await self.write_addr_header(I3C_RSVD_BYTE)
         await self.send_byte_tbit(ccc)
         if defining_byte is not None:
             await self.send_byte_tbit(defining_byte)
@@ -468,7 +407,7 @@ class I3cController:
         self.log_info(f"I3C: CCC {hex(ccc)} RD (Directed @ {hex(addr)})")
 
         await self.send_start()
-        await self.write_addr_header(I3cController.RSVD_BYTE)
+        await self.write_addr_header(I3C_RSVD_BYTE)
         await self.send_byte_tbit(ccc)
         if defining_byte is not None:
             await self.send_byte_tbit(defining_byte)
