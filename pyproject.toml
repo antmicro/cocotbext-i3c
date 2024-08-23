@@ -7,11 +7,12 @@ name = "cocotbext-i3c"
 dynamic = ["version"]
 requires-python = ">=3.11"
 dependencies = [
-    "cocotb >= 1.8.1",
+    "cocotb == 1.8.1",
     "black >= 24.4.2",
     "flake8 >= 7.0.0",
     "isort >= 5.13.2",
-    "pyproject-flake8 >= 5.0.4"
+    "pyproject-flake8 >= 5.0.4",
+    "pytest >= 7.4.0"
 ]
 
 authors = [
@@ -54,7 +55,7 @@ multi_line_output = 3
 
 
 [tool.flake8]
-ignore = ["E501", "W503", "F403", "F405"]
+ignore = ["E203", "E501", "W503", "F403", "F405"]
 max-line-length = 100
 max-complexity = 27
 select = ["B","C","E","F","W","T4","B9"]
@@ -71,3 +72,8 @@ exclude = [
 count = true
 show-source = true
 statistics = true
+
+[tool.pytest.ini_options]
+pythonpath = [
+  ".", "src", "tests"
+]
