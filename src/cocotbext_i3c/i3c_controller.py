@@ -83,6 +83,7 @@ class I3cController:
         self.tcasr = make_timer(timings.tcasr)
         self.tfree = make_timer(timings.tfree)
         self.tsco = make_timer(timings.tsco)
+        self.tdigh = make_timer(timings.tdigh)
 
         self.hold_data = False
 

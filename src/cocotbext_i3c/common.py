@@ -54,6 +54,7 @@ class I3cTimings:
     tsu_od: float = 3.0  # Open-drain set-up time
     tsupp: float = 3.0  # SDA Set-up time
     tsco: float = 12.0  # Clock in to Data Out for Target (max)
+    tdigh: float = 32.0
 
 
 @dataclass
