@@ -182,6 +182,18 @@ class I3cController:
         self._state = I3cState.FREE
         self.hold_data = False
 
+    async def send_hdr_exit(self) -> None:
+        self.log_info("I3C: HDR exit")
+        self._state = I3cState.FREE
+        self.scl = 0
+        for _ in range(4):
+            await self.tdigh
+            self.sda = 1
+            await self.tdigh
+            self.sda = 0
+        await self.tdigh
+        await self.send_stop()
+
     async def send_bit(self, b: bool) -> None:
         if not self.bus_active:
             self.send_start()
