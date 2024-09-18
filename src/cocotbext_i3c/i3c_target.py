@@ -5,7 +5,17 @@ from typing import Any, Optional
 import cocotb
 from cocotb.handle import ModifiableObject
 from cocotb.result import SimTimeoutError
-from cocotb.triggers import Edge, FallingEdge, First, NextTimeStep, ReadOnly, RisingEdge
+from cocotb.triggers import (
+    Edge,
+    Event,
+    FallingEdge,
+    First,
+    NextTimeStep,
+    ReadOnly,
+    RisingEdge,
+    Timer,
+    with_timeout,
+)
 
 from .common import (
     FULL_SPEED,
@@ -16,6 +26,7 @@ from .common import (
     check_hold,
     check_in_time,
     report_config,
+    with_timeout_event,
 )
 
 
@@ -143,6 +154,7 @@ class I3CTarget:
         **kwargs,
     ) -> None:
         self.log = logging.getLogger(f"cocotb.{sda_o._path}")
+        self.log.setLevel("DEBUG")
         self.sda_i = sda_i
         self.sda_o = sda_o
         self.scl_i = scl_i
@@ -176,6 +188,11 @@ class I3CTarget:
         self._header = I3cHeader.NONE
         report_config(self.speed, timings, self.log.info)
 
+        self.monitor_enable = Event()
+        self.monitor_enable.set()
+        self.monitor_idle = Event()
+        self.log.debug(f"monitor_enable: {self.monitor_enable}")
+        self.log.debug(f"monitor_idle: {self.monitor_idle}")
         cocotb.start_soon(self._run())
 
         self.hdr_exit_detected = False
@@ -218,6 +235,7 @@ class I3CTarget:
             self.debug_detected_header_o.setimmediatevalue(value)
 
     async def check_start(self, repeated=True):
+        # self.log.debug(f"check_start repeated: {repeated}")
         if not (self.sda and self.scl):
             return None
 
@@ -248,13 +266,21 @@ class I3CTarget:
 
         sda_falling_edge = FallingEdge(self.sda_i)
         scl_falling_edge = FallingEdge(self.scl_i)
-        result = await First(sda_falling_edge, scl_falling_edge)
+        result = None
+        monitor_enable = self.monitor_enable.is_set()
+        while ((not monitor_enable) or (monitor_enable and self.monitor_enable.is_set())) and result is None:
+            try:
+                result = await with_timeout(First(sda_falling_edge, scl_falling_edge), 1, "ns")
+            except SimTimeoutError:
+                self.log.debug("Waiting for SDA/SCL falling edge")
 
         if result != sda_falling_edge:
             return None
         try:
+            self.log.debug("Wait for falling_scl")
             await check_in_time(FallingEdge(self.scl_i), tCAS)
         except Exception:
+            self.log.error("SCL did not fall in time")
             return None
 
         # TODO: Add timing check, as the `sda` should be raised no earlier than `ds_od`
@@ -274,17 +300,18 @@ class I3CTarget:
         if self.sda:
             return None
 
-        sda_edge = RisingEdge(self.sda_i)
-        scl_edge = FallingEdge(self.scl_i)
+        rising_sda = RisingEdge(self.sda_i)
+        falling_scl = FallingEdge(self.scl_i)
 
         try:
-            first_rising_edge, _ = await check_in_time(First(sda_edge, scl_edge), self.timings.tcbp)
+            self.log.debug("Wait for rising_sda or falling_scl")
+            first_rising_edge, _ = await check_in_time(First(rising_sda, falling_scl), self.timings.tcbp)
         except Exception:
             return None
 
         # The `and self.scl` is necessary in case both edges occur at the same time
         # `First` then chooses one of the options to return arbitrarily
-        if first_rising_edge != sda_edge or self.scl_i.value == 0:
+        if first_rising_edge != rising_sda or self.scl_i.value == 0:
             return None
 
         self.state = I3cState.STOP
@@ -354,6 +381,7 @@ class I3CTarget:
         s, b = 0, 0
         next_state = None
         if check_for_stop:
+            self.log.debug("Check for stop")
             next_state = await self.check_stop()
             if next_state == I3cState.STOP:
                 return 0xFF, next_state
@@ -369,6 +397,7 @@ class I3CTarget:
         elif ack:
             await self.ack()
 
+        self.log.debug("Check for start")
         next_state = await self.check_start(repeated=True)
         return b, next_state
 
@@ -379,26 +408,29 @@ class I3CTarget:
         self.sda = bool(bit)
 
         await FallingEdge(self.scl_i)
+        # TODO: Ensure that the sent bit was propagated on the bus
+        # assert self.sda_i.value == int(bit)
         self.sda = 1
 
-    async def send_byte(self, byte: int):
+    async def send_byte(self, byte: int, terminate: bool):
         for i in range(8):
             await self.send_bit(byte & (1 << 7 - i))
 
         self.state = I3cState.TBIT_RD
-        # Issue end of data if there's no more data to be send
-        tbit = self._mem.read_ptr < self._mem.write_ptr  # TODO: Make it a function in memory
         if self.scl:
             await FallingEdge(self.scl_i)
 
-        self.sda = tbit
+        # Issue end of data if there's no more data to be send
+        self.sda = not terminate
+        self.log.debug(f"Set T-Bit to {not terminate}")
         await RisingEdge(self.scl_i)
-        terminate_request = not bool(self.sda)
         self.sda = 1
+        self.log.debug(f"Terminate?: {terminate}")
 
         # Wait for Sr or P if termination requested
         next_state = None
-        if terminate_request:
+        if terminate:
+            self.log.debug("Terminating...")
             if await self.check_stop():
                 next_state = I3cState.STOP
             elif await self.check_start(repeated=True):
@@ -412,6 +444,7 @@ class I3CTarget:
         addr, is_read = addr_header >> 1, addr_header & 0x1
 
         self.log.warning(f"TARGET:::Address: {hex(addr)} RnW: {is_read}")
+        self.log.warning(f"My address: {hex(self.address)}")
 
         if addr == I3C_RSVD_BYTE:
             assert self.header in [I3cHeader.NONE, I3cHeader.READ, I3cHeader.WRITE]
@@ -430,7 +463,8 @@ class I3CTarget:
         while not next_state:
             self.state = I3cState.DATA_RD
             data = self._mem.read()
-            next_state = await self.send_byte(data[0] & 0xFF)
+            tbit = self._mem.read_ptr < self._mem.write_ptr
+            next_state = await self.send_byte(data[0] & 0xFF, not tbit)
         self.state = next_state
         return next_state
 
@@ -447,6 +481,7 @@ class I3CTarget:
 
     async def handle_message(self):
         await self.wait_header()
+        self.log.debug(f"Header: {self.header}")
         match self.header:
             case I3cHeader.RESERVED:
                 self.state = I3cState.AWAIT_SR_OR_P
@@ -497,15 +532,76 @@ class I3CTarget:
             self.hdr_exit_detected = True
             self.log.info("Detected HDR Exit Pattern!")
 
+    async def send_ibi(self, mdb=None, data: bytearray = None):
+        # Disable bus monitor and wait for bus to enter idle state
+        self.log.debug("Send IBI")
+        self.monitor_enable.clear()
+        self.log.debug("Disabled monitor enable")
+        if not self.monitor_idle.is_set():
+            self.log.debug("Await monitor_idle")
+            await self.monitor_idle.wait()
+        self.log.debug("Monitor idle detected")
+        assert not self.bus_active
+
+        # Issue START condition
+        self.sda = 0
+
+        # For now expect IBI accept but the controller can also NACK
+        self.log.debug("Await falling scl")
+        await FallingEdge(self.scl_i)
+
+        # Send address with RnW bit set to 1'b1
+        self.log.debug("Send address on bus")
+        terminate = mdb is None and data is None
+        next_state = await self.send_byte((self.address << 1) | 1, terminate=terminate)
+        if mdb:
+            next_state = await self.send_byte(mdb, terminate=bool(not data))
+
+        while data:
+            value = data.pop(0)
+            terminate = not bool(len(data))
+            self.log.debug(f"Data: {data}, {len(data)}, {terminate}")
+            next_state = await self.send_byte(value, terminate=terminate)
+
+        self.state = next_state
+        if self.state == I3cState.STOP:
+            self.log.debug("TARGET:::Got STOP.")
+            self.state = I3cState.FREE
+            self.header = I3cHeader.NONE
+        # Next steps:
+        # 1. If targets BCR[2] == 1:
+        #    1. Send Mandatory Data Byte
+        #    2. Send optional additional IBI data
+        #    3. Expect STOP or Repeated START
+        # 2. Else expect STOP or Repeated START
+
+        # Finish IBI handling and re-enable bus monitor
+        self.monitor_enable.set()
+
     async def _run(self) -> None:
         while True:
+            # Monitor is idle, it will check whether it is enabled before observing the bus
+            self.monitor_idle.set()
+            if not self.monitor_enable.is_set():
+                self.log.debug("Monitor disabled, awaiting for external enable trigger")
+                await self.monitor_enable.wait()
+            self.monitor_enable.set()
+
+            # From this moment monitor is busy and should not be interrupted
+            self.monitor_idle.clear()
+
             # Wait for action on the bus
             next_state = await self.check_start(repeated=False)
             if next_state:
                 self.state = next_state
             else:
-                await First(Edge(self.sda_i), Edge(self.scl_i))
+                await with_timeout_event(
+                    self.monitor_enable,
+                    First(Edge(self.sda_i), Edge(self.scl_i)),
+                    1,
+                )
 
+            # self.log.debug(f"bus_active: {self.bus_active}")
             while self.bus_active:
                 self.state = await self.handle_message()
 

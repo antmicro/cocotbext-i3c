@@ -7,8 +7,9 @@ import logging
 from enum import Enum
 from typing import Any, Iterable, Optional
 
+import cocotb
 from cocotb.handle import ModifiableObject
-from cocotb.triggers import Timer
+from cocotb.triggers import Event, FallingEdge, First, NextTimeStep, Timer
 
 from .common import (
     I3C_RSVD_BYTE,
@@ -16,6 +17,7 @@ from .common import (
     I3cState,
     calculate_tbit,
     report_config,
+    with_timeout_event,
 )
 
 
@@ -49,6 +51,7 @@ class I3cController:
         **kwargs,
     ) -> None:
         self.log = logging.getLogger(f"cocotb.{sda_o._path}")
+        self.log.setLevel("DEBUG")
         self.sda_i = sda_i
         self.sda_o = sda_o
         self.scl_i = scl_i
@@ -97,6 +100,14 @@ class I3cController:
 
         report_config(self.speed, timings, lambda x: self.log_info(x))
 
+        self.monitor_enable = Event()
+        self.monitor_enable.set()
+        self.monitor_idle = Event()
+        self.log.debug(f"monitor_enable: {self.monitor_enable}")
+        self.log.debug(f"monitor_idle: {self.monitor_idle}")
+        if self.sda_i is not None and self.scl_i is not None:
+            cocotb.start_soon(self._run())
+
     def log_info(self, *args):
         if self.silent:
             return
@@ -136,6 +147,53 @@ class I3cController:
     def sda(self, value: Any) -> None:
         self.sda_o.value = value
 
+    async def take_bus_control(self):
+        # Disable bus monitor and wait for bus to enter idle state
+        self.monitor_enable.clear()
+        if not self.monitor_idle.is_set():
+            self.log.debug("await monitor idle")
+            await self.monitor_idle.wait()
+            self.log.debug("done monitor idle")
+
+    def give_bus_control(self):
+        self.monitor_enable.set()
+
+    async def _hold_data(self):
+        self.log.debug("_hold_data()")
+        if self.hold_data:
+            await self.thd
+        else:
+            self.log.debug("await NextTimeStep()")
+            await Timer(1, "ps")
+        self.log.debug("Finished _hold_data()")
+
+    async def check_start(self):
+        # self.log.debug("check_start")
+        if not (self.sda and self.scl):
+            return None
+
+        if self.bus_active:
+            self.log.debug("Repeated start")
+        else:
+            self.log.debug("Start")
+
+        sda_falling_edge = FallingEdge(self.sda_i)
+        scl_falling_edge = FallingEdge(self.scl_i)
+        result = await with_timeout_event(
+            self.monitor_enable,
+            First(sda_falling_edge, scl_falling_edge),
+            I3cControllerTimings().tcas,
+        )
+
+        if result != sda_falling_edge:
+            return None
+
+        await self.tcas
+        self.scl = 0
+        await self.tdig_l
+
+        return I3cState.START
+
     async def send_start(self) -> None:
         if self.bus_active:
             clock_after_data_t = self.tcasr
@@ -156,8 +214,10 @@ class I3cController:
         await self.tcbsr
 
         self.sda = 0
+        self.log.debug("SDA low, wait cbsr")
         await clock_after_data_t
         self.scl = 0
+        self.log.debug("SCL low, wait casr")
         await self.tcasr
 
         self.hold_data = False
@@ -169,8 +229,7 @@ class I3cController:
             return
 
         self.scl = 0
-        if self.hold_data:
-            await self.thd
+        await self._hold_data()
         self.sda = 0
         await self.remaining_tlow
         self.scl = 1
@@ -183,6 +242,7 @@ class I3cController:
 
     async def send_hdr_exit(self) -> None:
         self.log_info("I3C: HDR exit")
+        await self.take_bus_control()
         self._state = I3cState.FREE
         self.scl = 0
         self.sda = 1
@@ -194,14 +254,15 @@ class I3cController:
         await self.tdig_h
         self.sda = 0
         await self.send_stop()
+        self.give_bus_control()
 
     async def send_bit(self, b: bool) -> None:
+        self.log.debug("send_bit")
         if not self.bus_active:
             self.send_start()
 
         self.scl = 0
-        if self.hold_data:
-            await self.thd
+        await self._hold_data()
         self.sda = bool(b)
         await self.remaining_tlow
         self.scl = 1
@@ -213,8 +274,7 @@ class I3cController:
             self.send_start()
 
         self.scl = 0
-        if self.hold_data:
-            await self.thd
+        await self._hold_data()
         self.sda = 1
         await self.remaining_tlow
         if self.sda_i is None:
@@ -228,6 +288,7 @@ class I3cController:
         return b
 
     async def recv_bit_od(self) -> bool:
+        self.log.debug("recv_bit_od")
         if not self.bus_active:
             self.send_start()
 
@@ -274,6 +335,7 @@ class I3cController:
         self.scl = 0
         await self.tsco
         eod = not bool(self.sda)
+        self.log_info(f"EOD: {eod}, request_end: {request_end}")
         await self.tdig_l_minus_tsco
         # At this point target should set SDA to High-Z.
         self.scl = 1
@@ -299,6 +361,7 @@ class I3cController:
         for _ in range(8):
             b = (b << 1) | (1 if await self.recv_bit() else 0)
         self._state = I3cState.TBIT_RD
+        self.log_info("tbi_eod")
         tgt_eod = await self.tbit_eod(request_end=stop)
         return (b, tgt_eod | stop)
 
@@ -314,9 +377,11 @@ class I3cController:
             self.log_info("Address Header:::Got ACK")
 
     async def recv_until_eod_tbit(self, buf: bytearray, count: int) -> None:
-        for i in range(count):
-            (byte, stop) = await self.recv_byte_t_bit(stop=(i == count - 1))
-            self.log_info(f"I3C: read byte {hex(byte)}, idx={i}")
+        length = count if (count != 0) else 1
+        while(length):
+            length = (length - 1) if (count != 0) else 1
+            (byte, stop) = await self.recv_byte_t_bit(stop=(length == 0))
+            self.log_info(f"I3C: read byte {hex(byte)}, idx={length}, stop={stop}")
             buf.append(byte)
             if stop:
                 return
@@ -329,6 +394,7 @@ class I3cController:
         mode: I3cXferMode = I3cXferMode.PRIVATE,
     ) -> None:
         """I3C Private Write transfer"""
+        await self.take_bus_control()
         self.log_info(f"I3C: Write data ({mode.name}) {data} @ {hex(addr)}")
         await self.send_start()
         await self.write_addr_header(I3C_RSVD_BYTE)
@@ -346,10 +412,13 @@ class I3cController:
         if stop:
             await self.send_stop()
 
+        self.give_bus_control()
+
     async def i3c_read(
         self, addr: int, count: int, stop: bool = True, mode: I3cXferMode = I3cXferMode.PRIVATE
     ) -> bytearray:
         """I3C Private Read transfer"""
+        await self.take_bus_control()
         data = bytearray()
         self.log_info(f"I3C: Read data ({mode.name}) @ {hex(addr)}")
 
@@ -366,6 +435,7 @@ class I3cController:
         if stop:
             await self.send_stop()
 
+        self.give_bus_control()
         return data
 
     async def i3c_ccc_write(
@@ -377,6 +447,7 @@ class I3cController:
         stop: bool = True,
     ) -> None:
         """Issue CCC Write frame. For directed CCCs use an iterable of address-data tuples"""
+        await self.take_bus_control()
         is_broadcast = ccc <= 0x7F
 
         log_data = broadcast_data if is_broadcast else directed_data
@@ -408,6 +479,8 @@ class I3cController:
         if stop:
             await self.send_stop()
 
+        self.give_bus_control()
+
     async def i3c_ccc_read(
         self,
         ccc: int,
@@ -417,6 +490,7 @@ class I3cController:
         stop: bool = True,
     ) -> bytearray:
         """Issue CCC Read frame. For directed CCCs use an iterable of address-data tuples"""
+        await self.take_bus_control()
         data = bytearray()
         self.log_info(f"I3C: CCC {hex(ccc)} RD (Directed @ {hex(addr)})")
 
@@ -432,4 +506,30 @@ class I3cController:
         if stop:
             await self.send_stop()
 
+        self.give_bus_control()
         return data
+
+    async def handle_ibi(self):
+        assert not (self.sda or self.scl)
+
+        data = bytearray()
+        await self.recv_until_eod_tbit(data, 0)
+        await self.send_stop()
+
+    async def _run(self) -> None:
+        while True:
+            # self.log.debug("_run loop")
+            self.monitor_idle.set()
+            # self.log.debug("monitor is idle")
+            if not self.monitor_enable.is_set():
+                await self.monitor_enable.wait()
+            # self.log.debug("monitor is not idle")
+            self.monitor_idle.clear()
+
+            # Wait for action on the bus
+            next_state = await self.check_start()
+
+            if next_state == I3cState.START:
+                await self.handle_ibi()
+
+            await NextTimeStep()
