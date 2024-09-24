@@ -35,8 +35,8 @@ class I3cTimings:
     # * Table 87 'I3C Push-Pull Timing Parameters for SDR, ML, HDR-DDR, and HDR-BT Modes'
     # of I3C Basic Specification v1.1.1
     thd: float  # SDA Hold time
-    thigh_d: float = 32.0  # High Period of SCL Clock (for Pure Bus)
-    tlow_d: float = 32.0  # SCL Clock Low Period
+    tdig_h: float = 32.0  # SCL Clock High Period (for Pure Bus)
+    tdig_l: float = 32.0  # SCL Clock Low Period
     tcas: float = 38.4  # Clock After START (S) Condition
     tcbp: float = 19.2  # Clock Before STOP (P) Condition
     tcbsr: float = 19.2  # Clock Before Repeated START (Sr) Condition
@@ -54,7 +54,6 @@ class I3cTimings:
     tsu_od: float = 3.0  # Open-drain set-up time
     tsupp: float = 3.0  # SDA Set-up time
     tsco: float = 12.0  # Clock in to Data Out for Target (max)
-    tdigh: float = 32.0
 
 
 @dataclass
@@ -139,8 +138,8 @@ def report_config(speed: float, timings: I3cTimings, log_method: Callable[[str],
     log_method(f"I3C {mode} configuration:")
     log_method(f"  Rate: {speed / 1000.0}kHz " f"({100.0 * speed / FULL_SPEED}%)")
     log_method("  Timings:")
-    log_method(f"    SCL Clock High Period: {scaled_timing(timings.thigh_d)}ns")
-    log_method(f"    SCL Clock Low Period: {scaled_timing(timings.tlow_d)}ns")
+    log_method(f"    SCL Clock High Period: {scaled_timing(timings.tdig_h)}ns")
+    log_method(f"    SCL Clock Low Period: {scaled_timing(timings.tdig_l)}ns")
     log_method(f"    Clock After START (S) Condition: {scaled_timing(timings.tcas)}ns")
     log_method(f"    Clock Before STOP (P) Condition: {scaled_timing(timings.tcbp)}ns")
     log_method(f"    Clock Before Repeated START (Sr) Condition: {scaled_timing(timings.tcbsr)}ns")

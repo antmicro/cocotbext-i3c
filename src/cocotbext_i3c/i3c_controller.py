@@ -70,11 +70,11 @@ class I3cController:
         def at_least_tsupp(period_ns: float) -> float:
             return period_ns if period_ns > timings.tsupp else timings.tsupp
 
-        self.thigh_d = make_timer(timings.thigh_d)
+        self.tdig_h = make_timer(timings.tdig_h)
         self.thd = make_timer(timings.thd)
-        self.tlow_d = make_timer(at_least_tsupp(timings.tlow_d))
-        self.tlow_d_minus_thd = make_timer(at_least_tsupp(timings.tlow_d - timings.thd))
-        self.tlow_d_minus_tsco = make_timer(at_least_tsupp(timings.tlow_d - timings.tsco))
+        self.tdig_l = make_timer(at_least_tsupp(timings.tdig_l))
+        self.tdig_l_minus_thd = make_timer(at_least_tsupp(timings.tdig_l - timings.thd))
+        self.tdig_l_minus_tsco = make_timer(at_least_tsupp(timings.tdig_l - timings.tsco))
         self.tsu_od = make_timer(timings.tsu_od)
         self.tcas = make_timer(timings.tcas)
         self.tcbp = make_timer(timings.tcbp)
@@ -83,7 +83,6 @@ class I3cController:
         self.tcasr = make_timer(timings.tcasr)
         self.tfree = make_timer(timings.tfree)
         self.tsco = make_timer(timings.tsco)
-        self.tdigh = make_timer(timings.tdigh)
 
         self.hold_data = False
 
@@ -113,7 +112,7 @@ class I3cController:
 
     @property
     def remaining_tlow(self) -> Timer:
-        return self.tlow_d if not self.hold_data else self.tlow_d_minus_thd
+        return self.tdig_l if not self.hold_data else self.tdig_l_minus_thd
 
     @_state.setter
     def _state(self, value: I3cState) -> None:
@@ -144,7 +143,7 @@ class I3cController:
             self.scl = 0
             await self.thd
             self.sda = 1
-            await self.tlow_d_minus_thd
+            await self.tdig_l_minus_thd
         else:
             clock_after_data_t = self.tcas
             self._state = I3cState.START
@@ -187,11 +186,11 @@ class I3cController:
         self._state = I3cState.FREE
         self.scl = 0
         for _ in range(4):
-            await self.tdigh
+            await self.tdig_h
             self.sda = 1
-            await self.tdigh
+            await self.tdig_h
             self.sda = 0
-        await self.tdigh
+        await self.tdig_h
         await self.send_stop()
 
     async def send_bit(self, b: bool) -> None:
@@ -204,7 +203,7 @@ class I3cController:
         self.sda = bool(b)
         await self.remaining_tlow
         self.scl = 1
-        await self.thigh_d
+        await self.tdig_h
         self.hold_data = True
 
     async def recv_bit(self) -> bool:
@@ -221,7 +220,7 @@ class I3cController:
         else:
             b = bool(self.sda)
         self.scl = 1
-        await self.thigh_d
+        await self.tdig_h
         self.hold_data = False
 
         return b
@@ -233,13 +232,13 @@ class I3cController:
         self.scl = 0
         # We don't hold the data here, because it's on the target to pull it down
         # after the required amount of time
-        await self.tlow_d
+        await self.tdig_l
         if self.sda_i is None:
             b = False
         else:
             b = bool(self.sda)
         self.scl = 1
-        await self.thigh_d
+        await self.tdig_h
         self.hold_data = False
 
         return b
@@ -273,13 +272,13 @@ class I3cController:
         self.scl = 0
         await self.tsco
         eod = not bool(self.sda)
-        await self.tlow_d_minus_tsco
+        await self.tdig_l_minus_tsco
         # At this point target should set SDA to High-Z.
         self.scl = 1
         if eod:  # Target requests end-of-data
             self.sda = 0
             self.hold_data = False
-            await self.thigh_d
+            await self.tdig_h
             # This should be followed by a stop signal: self.send_stop
         elif request_end:  # Controller requests end-of-data
             # This is basically RS and should be followed by a stop signal: self.send_stop
@@ -288,7 +287,7 @@ class I3cController:
             await self.tcasr
         else:
             self.hold_data = False
-            await self.thigh_d
+            await self.tdig_h
 
         return eod
 
