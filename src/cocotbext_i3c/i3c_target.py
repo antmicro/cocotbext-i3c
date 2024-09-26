@@ -5,7 +5,7 @@ from typing import Any, Optional
 import cocotb
 from cocotb.handle import ModifiableObject
 from cocotb.result import SimTimeoutError
-from cocotb.triggers import Edge, FallingEdge, First, ReadOnly, RisingEdge
+from cocotb.triggers import Edge, FallingEdge, First, NextTimeStep, ReadOnly, RisingEdge
 
 from .common import (
     FULL_SPEED,
@@ -177,6 +177,9 @@ class I3CTarget:
         report_config(self.speed, timings, self.log.info)
 
         cocotb.start_soon(self._run())
+
+        self.hdr_exit_detected = False
+        cocotb.start_soon(self._detect_hdr_exit())
 
     @property
     def bus_active(self) -> bool:
@@ -470,6 +473,29 @@ class I3CTarget:
                     ]
                 )
         return next_state
+
+    def clear_hdr_exit_flag(self):
+        self.hdr_exit_detected = False
+
+    async def _detect_hdr_exit(self):
+        self.log.info("Starting HDR Exit Pattern detection monitor")
+        while True:
+            if not (not self.scl and self.sda):
+                await NextTimeStep()
+                continue
+
+            for _ in range(4):
+                rising_scl = RisingEdge(self.scl_i)
+                falling_sda = FallingEdge(self.sda_i)
+                trigger = await First(rising_scl, falling_sda)
+                if trigger == rising_scl:
+                    break
+
+            if trigger == rising_scl:
+                continue
+
+            self.hdr_exit_detected = True
+            self.log.info("Detected HDR Exit Pattern!")
 
     async def _run(self) -> None:
         while True:
