@@ -25,6 +25,7 @@ class I3cState(IntEnum):
     CCC = 9
     STOP = 10
     AWAIT_SR_OR_P = 11
+    TARGET_RESET = 12
 
 
 @dataclass
@@ -171,3 +172,11 @@ async def with_timeout_event(event, trigger, timeout_in_ns, precision=(100, "ps"
             pass
 
     return result
+
+
+class I3cTargetResetAction(IntEnum):
+    NO_RESET = 0x00
+    RESET_PERIPHERAL_ONLY = 0x01
+    RESET_WHOLE_TARGET = 0x02
+    DEBUG_NETWORK_ADAPTER_RESET = 0x03
+    VIRTUAL_TARGET_DETECT = 0x04

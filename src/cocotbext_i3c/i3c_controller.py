@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 import logging
 from enum import Enum
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Union, TypeVar, Callable
 
 import cocotb
 from cocotb.handle import ModifiableObject
@@ -15,12 +15,14 @@ from .common import (
     I3C_RSVD_BYTE,
     I3cControllerTimings,
     I3cState,
+    I3cTargetResetAction,
     calculate_tbit,
     make_timer,
     report_config,
     with_timeout_event,
 )
 
+_T = TypeVar("_T")
 
 class I3cXferMode(Enum):
     PRIVATE = 0
@@ -135,6 +137,11 @@ class I3cController:
             self.scl_o.setimmediatevalue(1)
         self._state_ = I3cState.FREE
         self._state = I3cState.FREE
+
+        self.interpret_target_peripheral_reset_timing_ns: Callable[[int], int] = lambda _: 1000000
+        self.interpret_target_whole_reset_timing_ns: Callable[[int], int] = lambda _: 1000000000
+        self.interpret_target_net_adapter_reset_timing_ns: Callable[[int], int] = \
+            lambda _: 1000000000000
 
         report_config(self.speed, timings, lambda x: self.log_info(x))
 
@@ -261,6 +268,23 @@ class I3cController:
 
         return I3cState.START
 
+    def _ccc_addresses_for_def_byte(
+        def_bytes: Iterable[tuple[int, _T]],
+        merge: bool = True
+    ) -> Iterable[tuple[_T, list[int]]]:
+        if merge:
+            merged: dict[_T, list[int]] = {}
+            for address, def_byte in def_bytes:
+                if merged.get(def_byte) is None:
+                    merged[def_byte] = []
+                merged[def_byte].append(address)
+
+            for def_byte, addresses in merged.items():
+                yield def_byte, addresses
+        else:
+            for addr, def_byte in def_bytes:
+                return def_byte, [addr]
+
     async def send_start(self) -> None:
         if self.bus_active:
             clock_after_data_t = self.tcasr
@@ -320,6 +344,134 @@ class I3cController:
         self.sda = 0
         await self.send_stop()
         self.give_bus_control()
+
+    async def target_reset(
+        self,
+        reset_actions: Union[Iterable[tuple[int, I3cTargetResetAction]],
+                             I3cTargetResetAction, None] = None,
+        query_timings: Union[bool, Iterable[int]] = False,
+        assumed_default_action: I3cTargetResetAction = I3cTargetResetAction.RESET_PERIPHERAL_ONLY,
+        merge_ccc_actions = True
+    ) -> None:
+        if reset_actions is None:
+            await self.send_start()
+
+        # Set up reset actions
+
+        match reset_actions:
+            case I3cTargetResetAction():
+                # Broadcast RSTACT
+                await self.i3c_ccc_write(
+                    ccc=0x2A,
+                    defining_byte=reset_actions,
+                    stop=False
+                )
+            case None: pass
+            case _: # Assume iterable
+                # Directed RSTACT
+                for reset_action, addresses in I3cController._ccc_addresses_for_def_byte(
+                    def_bytes=reset_actions,
+                    merge=merge_ccc_actions
+                ):
+                    await self.i3c_ccc_write(
+                        ccc=0x9A,
+                        defining_byte=reset_action,
+                        directed_data=map(lambda addr: (addr, []), addresses),
+                        stop=False
+                    )
+
+        queries: list[tuple[int, int]] = []
+        def add_timing_query_for_reset_action(addr: int, action: I3cTargetResetAction):
+            match action:
+                case I3cTargetResetAction.NO_RESET: pass
+                case I3cTargetResetAction.RESET_PERIPHERAL_ONLY:
+                    queries.append((addr, 0x81))
+                case I3cTargetResetAction.RESET_WHOLE_TARGET:
+                    queries.append((addr, 0x82))
+                case I3cTargetResetAction.DEBUG_NETWORK_ADAPTER_RESET:
+                    queries.append((addr, 0x83))
+                case _:
+                    raise RuntimeError("Unsupported reset action for timing query: "
+                                        f"`{action}`")
+
+        # Prepare RSTACT queries
+
+        match query_timings, reset_actions:
+            case False, _: pass
+            case True, I3cTargetResetAction():
+                raise RuntimeError("query_timings can't be used without "
+                                    "specifying reset targets")
+            case True, _: # Assume Iterable
+                for addr, action in reset_actions:
+                    add_timing_query_for_reset_action(addr, action)
+            case _, _: # Assume Iterable
+                addr_actions: dict[int, list[I3cTargetResetAction]] = {}
+                for address, action in reset_actions:
+                    if addr_actions.get(address) is None:
+                        addr_actions[address] = []
+                    addr_actions[address].append(action)
+
+                for address in query_timings:
+                    actions = addr_actions.get(address)
+                    if actions is not None:
+                        for action in actions:
+                            add_timing_query_for_reset_action(address, action)
+                    else:
+                        add_timing_query_for_reset_action(address, assumed_default_action)
+            case _, I3cTargetResetAction(): # Assume Iterable
+                for address in query_timings:
+                    add_timing_query_for_reset_action(address, reset_actions)
+            case _, None: # Assume Iterable
+                for address in query_timings:
+                    add_timing_query_for_reset_action(address, assumed_default_action)
+
+        # Query and calculate reset time
+
+        max_timing = 0
+        # TODO: exapnd semantics of i3c_ccc_read to allow querying multiple addresses
+        # within a single CCC
+        for address, def_byte in queries:
+            # TODO: Handle NACKs
+            timing_v = await self.i3c_ccc_read(
+                ccc=0x2A,
+                addr=address,
+                count=1,
+                defining_byte=def_byte
+            )[0]
+
+            timing_ns = 0
+            match def_byte:
+                case 0x81:
+                    timing_ns = self.interpret_target_peripheral_reset_timing_ns(timing_v)
+                case 0x82:
+                    timing_ns = self.interpret_target_whole_reset_timing_ns(timing_v)
+                case 0x83:
+                    timing_ns = self.interpret_target_net_adapter_reset_timing_ns(timing_v)
+            if timing_ns > max_timing:
+                max_timing = timing_ns
+
+        # Send target reset pattern
+
+        self._state = I3cState.TARGET_RESET
+
+        sda = 1
+        self.sda = sda
+        self.scl = 0
+        for _ in range(14):
+            await self.tdig_h
+            sda = 0 if (sda != 0) else 1
+            self.sda = sda
+        await self.tdig_h
+        self.scl = 1
+
+        await self.tdig_h
+        await self.send_start()
+        await self.send_stop()
+
+        if max_timing != 0:
+            await Timer(max_timing, "ns")
+        # TODO: Send start and I3C address header?
+
 
     async def send_bit(self, b: bool) -> None:
         if not self.bus_active:
@@ -528,10 +680,9 @@ class I3cController:
             await self.send_byte_tbit(defining_byte)
 
         if is_broadcast:
-            assert broadcast_data is not None
-
-            for byte in broadcast_data:
-                await self.send_byte_tbit(byte)
+            if broadcast_data is not None:
+                for byte in broadcast_data:
+                    await self.send_byte_tbit(byte)
         else:
             assert directed_data is not None
 
