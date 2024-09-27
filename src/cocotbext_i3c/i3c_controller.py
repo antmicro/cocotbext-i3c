@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 import logging
 from enum import Enum
-from typing import Any, Iterable, Optional, Union, TypeVar, Callable
+from typing import Any, Callable, Iterable, Optional, TypeVar, Union
 
 import cocotb
 from cocotb.handle import ModifiableObject
@@ -283,7 +283,7 @@ class I3cController:
                 yield def_byte, addresses
         else:
             for addr, def_byte in def_bytes:
-                return def_byte, [addr]
+                yield def_byte, [addr]
 
     async def send_start(self) -> None:
         if self.bus_active:
@@ -356,6 +356,8 @@ class I3cController:
         if reset_actions is None:
             await self.send_start()
 
+        last_ccc = "none"
+
         # Set up reset actions
 
         match reset_actions:
@@ -366,6 +368,7 @@ class I3cController:
                     defining_byte=reset_actions,
                     stop=False
                 )
+                last_ccc = "broadcast"
             case None: pass
             case _: # Assume iterable
                 # Directed RSTACT
@@ -373,12 +376,14 @@ class I3cController:
                     def_bytes=reset_actions,
                     merge=merge_ccc_actions
                 ):
+                    print(f"Reset action {reset_action} for {addresses}")
                     await self.i3c_ccc_write(
                         ccc=0x9A,
                         defining_byte=reset_action,
                         directed_data=map(lambda addr: (addr, []), addresses),
                         stop=False
                     )
+                    last_ccc = "direct"
 
         queries: list[tuple[int, int]] = []
         def add_timing_query_for_reset_action(addr: int, action: I3cTargetResetAction):
@@ -439,6 +444,8 @@ class I3cController:
                 defining_byte=def_byte
             )[0]
 
+            last_ccc = "direct"
+
             timing_ns = 0
             match def_byte:
                 case 0x81:
@@ -449,6 +456,16 @@ class I3cController:
                     timing_ns = self.interpret_target_net_adapter_reset_timing_ns(timing_v)
             if timing_ns > max_timing:
                 max_timing = timing_ns
+
+        # Finish sending CCCs without closing the frame
+        match last_ccc:
+            case "none": pass
+            case "broadcast":
+                await self.send_start()
+            case "direct":
+                await self.send_start()
+                await self.write_addr_header(I3C_RSVD_BYTE)
+                await self.send_start()
 
         # Send target reset pattern
 
