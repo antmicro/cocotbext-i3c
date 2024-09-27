@@ -123,7 +123,7 @@ class I3CTarget:
     * TODO: Handle CCCs.
     * TODO: Investigate `Sr` detection after private write-read sequence with no `STOP` condition.
             At some point of the test sequence `Sr` is not correctly intercepted after `DATA_RD`
-            state.
+            state. See also: FIXME in the test_recovery.
     * TODO: Add error recovery - illegal sequence will cause a simulation fail.
     """
 
