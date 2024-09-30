@@ -434,8 +434,7 @@ class I3CTarget:
         addr_header = await self.recv(bits_num=8)
         addr, is_read = addr_header >> 1, addr_header & 0x1
 
-        self.log.warning(f"TARGET:::Address: {hex(addr)} RnW: {is_read}")
-        self.log.warning(f"My address: {hex(self.address)}")
+        self.log.warning(f"TARGET:::Address: {hex(addr)}")
 
         if addr == I3C_RSVD_BYTE:
             assert self.header in [I3cHeader.NONE, I3cHeader.READ, I3cHeader.WRITE]

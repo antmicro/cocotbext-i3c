@@ -103,7 +103,9 @@ class I3cController:
         self.monitor_enable = Event()
         self.monitor_enable.set()
         self.monitor_idle = Event()
+        self.monitor = False
         if self.sda_i is not None and self.scl_i is not None:
+            self.monitor = True
             cocotb.start_soon(self._run())
 
     def log_info(self, *args):
@@ -146,25 +148,29 @@ class I3cController:
         self.sda_o.value = value
 
     async def take_bus_control(self):
+        if not self.monitor:
+            return
         # Disable bus monitor and wait for bus to enter idle state
         self.monitor_enable.clear()
         if not self.monitor_idle.is_set():
             await self.monitor_idle.wait()
 
     def give_bus_control(self):
+        if not self.monitor:
+            return
         self.monitor_enable.set()
 
     async def _hold_data(self):
         if self.hold_data:
             await self.thd
         else:
-            await Timer(1, "ps")
+            await Timer(10, "ps")
 
     async def check_start(self):
         if not (self.sda and self.scl):
             return None
 
-        # TODO: Add support for repeated start
+        # TODO: Add support for repeated start (is it even needed?)
         if self.bus_active:
             pass
         else:
