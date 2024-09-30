@@ -11,13 +11,15 @@ async def test_simple_ibi(dut):
     await tb.i3c_target.send_ibi()
     await Timer(100, "ns")
 
+
 @cocotb.test()
 async def test_simple_ibi_mdb(dut):
     tb = I3cTestbench(dut, tgt_address=0x2A)
 
     await Timer(100, "ns")
-    await tb.i3c_target.send_ibi(mdb=0xab)
+    await tb.i3c_target.send_ibi(mdb=0xAB)
     await Timer(100, "ns")
+
 
 @cocotb.test()
 async def test_simple_ibi_data(dut):

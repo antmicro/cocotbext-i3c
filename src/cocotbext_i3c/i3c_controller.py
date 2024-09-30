@@ -371,7 +371,7 @@ class I3cController:
 
     async def recv_until_eod_tbit(self, buf: bytearray, count: int) -> None:
         length = count if (count != 0) else 1
-        while(length):
+        while length:
             length = (length - 1) if (count != 0) else 1
             (byte, stop) = await self.recv_byte_t_bit(stop=(length == 0))
             self.log_info(f"I3C: read byte {hex(byte)}, idx={length}, stop={stop}")
