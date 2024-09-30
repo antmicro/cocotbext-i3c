@@ -89,6 +89,8 @@ class I3cController:
 
         self.hold_data = False
 
+        self.got_ibi = Event()
+
         super().__init__(*args, **kwargs)
 
         if self.sda_o is not None:
@@ -503,6 +505,17 @@ class I3cController:
         data = bytearray()
         await self.recv_until_eod_tbit(data, 0)
         await self.send_stop()
+
+        self.got_ibi.set(data)
+
+    async def wait_for_ibi(self):
+        """
+        Waits for an IBI. Returns its data
+        """
+        await self.got_ibi.wait()
+        data = self.got_ibi.data  # Get data from the event
+        self.got_ibi.clear()
+        return data
 
     async def _run(self) -> None:
         """
