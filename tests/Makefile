@@ -3,8 +3,7 @@ space := $(null) #
 comma := ,
 
 SIM = VERILATOR
-VERILATOR_TRACE = 1
-COMPILE_ARGS += --trace
+COMPILE_ARGS += --trace --trace-structs
 
 TEST_FILES   = $(sort $(wildcard test_*.py))
 
