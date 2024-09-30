@@ -154,7 +154,7 @@ class I3CTarget:
         **kwargs,
     ) -> None:
         self.log = logging.getLogger(f"cocotb.{sda_o._path}")
-        self.log.setLevel("DEBUG")
+        self.log.setLevel("INFO")
         self.sda_i = sda_i
         self.sda_o = sda_o
         self.scl_i = scl_i
@@ -191,8 +191,6 @@ class I3CTarget:
         self.monitor_enable = Event()
         self.monitor_enable.set()
         self.monitor_idle = Event()
-        self.log.debug(f"monitor_enable: {self.monitor_enable}")
-        self.log.debug(f"monitor_idle: {self.monitor_idle}")
         cocotb.start_soon(self._run())
 
         self.hdr_exit_detected = False
@@ -235,7 +233,6 @@ class I3CTarget:
             self.debug_detected_header_o.setimmediatevalue(value)
 
     async def check_start(self, repeated=True):
-        # self.log.debug(f"check_start repeated: {repeated}")
         if not (self.sda and self.scl):
             return None
 
@@ -277,7 +274,6 @@ class I3CTarget:
         if result != sda_falling_edge:
             return None
         try:
-            self.log.debug("Wait for falling_scl")
             await check_in_time(FallingEdge(self.scl_i), tCAS)
         except Exception:
             self.log.error("SCL did not fall in time")
@@ -381,7 +377,6 @@ class I3CTarget:
         s, b = 0, 0
         next_state = None
         if check_for_stop:
-            self.log.debug("Check for stop")
             next_state = await self.check_stop()
             if next_state == I3cState.STOP:
                 return 0xFF, next_state
@@ -397,7 +392,6 @@ class I3CTarget:
         elif ack:
             await self.ack()
 
-        self.log.debug("Check for start")
         next_state = await self.check_start(repeated=True)
         return b, next_state
 
@@ -422,15 +416,12 @@ class I3CTarget:
 
         # Issue end of data if there's no more data to be send
         self.sda = not terminate
-        self.log.debug(f"Set T-Bit to {not terminate}")
         await RisingEdge(self.scl_i)
         self.sda = 1
-        self.log.debug(f"Terminate?: {terminate}")
 
         # Wait for Sr or P if termination requested
         next_state = None
         if terminate:
-            self.log.debug("Terminating...")
             if await self.check_stop():
                 next_state = I3cState.STOP
             elif await self.check_start(repeated=True):
@@ -481,7 +472,6 @@ class I3CTarget:
 
     async def handle_message(self):
         await self.wait_header()
-        self.log.debug(f"Header: {self.header}")
         match self.header:
             case I3cHeader.RESERVED:
                 self.state = I3cState.AWAIT_SR_OR_P
@@ -534,24 +524,18 @@ class I3CTarget:
 
     async def send_ibi(self, mdb=None, data: bytearray = None):
         # Disable bus monitor and wait for bus to enter idle state
-        self.log.debug("Send IBI")
         self.monitor_enable.clear()
-        self.log.debug("Disabled monitor enable")
         if not self.monitor_idle.is_set():
-            self.log.debug("Await monitor_idle")
             await self.monitor_idle.wait()
-        self.log.debug("Monitor idle detected")
         assert not self.bus_active
 
         # Issue START condition
         self.sda = 0
 
         # For now expect IBI accept but the controller can also NACK
-        self.log.debug("Await falling scl")
         await FallingEdge(self.scl_i)
 
         # Send address with RnW bit set to 1'b1
-        self.log.debug("Send address on bus")
         terminate = mdb is None and data is None
         next_state = await self.send_byte((self.address << 1) | 1, terminate=terminate)
         if mdb:
@@ -560,7 +544,6 @@ class I3CTarget:
         while data:
             value = data.pop(0)
             terminate = not bool(len(data))
-            self.log.debug(f"Data: {data}, {len(data)}, {terminate}")
             next_state = await self.send_byte(value, terminate=terminate)
 
         self.state = next_state
@@ -568,12 +551,6 @@ class I3CTarget:
             self.log.debug("TARGET:::Got STOP.")
             self.state = I3cState.FREE
             self.header = I3cHeader.NONE
-        # Next steps:
-        # 1. If targets BCR[2] == 1:
-        #    1. Send Mandatory Data Byte
-        #    2. Send optional additional IBI data
-        #    3. Expect STOP or Repeated START
-        # 2. Else expect STOP or Repeated START
 
         # Finish IBI handling and re-enable bus monitor
         self.monitor_enable.set()
@@ -601,7 +578,6 @@ class I3CTarget:
                     1,
                 )
 
-            # self.log.debug(f"bus_active: {self.bus_active}")
             while self.bus_active:
                 self.state = await self.handle_message()
 

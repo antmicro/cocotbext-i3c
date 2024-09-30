@@ -103,8 +103,6 @@ class I3cController:
         self.monitor_enable = Event()
         self.monitor_enable.set()
         self.monitor_idle = Event()
-        self.log.debug(f"monitor_enable: {self.monitor_enable}")
-        self.log.debug(f"monitor_idle: {self.monitor_idle}")
         if self.sda_i is not None and self.scl_i is not None:
             cocotb.start_soon(self._run())
 
@@ -151,31 +149,26 @@ class I3cController:
         # Disable bus monitor and wait for bus to enter idle state
         self.monitor_enable.clear()
         if not self.monitor_idle.is_set():
-            self.log.debug("await monitor idle")
             await self.monitor_idle.wait()
-            self.log.debug("done monitor idle")
 
     def give_bus_control(self):
         self.monitor_enable.set()
 
     async def _hold_data(self):
-        self.log.debug("_hold_data()")
         if self.hold_data:
             await self.thd
         else:
-            self.log.debug("await NextTimeStep()")
             await Timer(1, "ps")
-        self.log.debug("Finished _hold_data()")
 
     async def check_start(self):
-        # self.log.debug("check_start")
         if not (self.sda and self.scl):
             return None
 
+        # TODO: Add support for repeated start
         if self.bus_active:
-            self.log.debug("Repeated start")
+            pass
         else:
-            self.log.debug("Start")
+            pass
 
         sda_falling_edge = FallingEdge(self.sda_i)
         scl_falling_edge = FallingEdge(self.scl_i)
@@ -214,10 +207,8 @@ class I3cController:
         await self.tcbsr
 
         self.sda = 0
-        self.log.debug("SDA low, wait cbsr")
         await clock_after_data_t
         self.scl = 0
-        self.log.debug("SCL low, wait casr")
         await self.tcasr
 
         self.hold_data = False
@@ -257,7 +248,6 @@ class I3cController:
         self.give_bus_control()
 
     async def send_bit(self, b: bool) -> None:
-        self.log.debug("send_bit")
         if not self.bus_active:
             self.send_start()
 
@@ -288,7 +278,6 @@ class I3cController:
         return b
 
     async def recv_bit_od(self) -> bool:
-        self.log.debug("recv_bit_od")
         if not self.bus_active:
             self.send_start()
 
@@ -335,7 +324,6 @@ class I3cController:
         self.scl = 0
         await self.tsco
         eod = not bool(self.sda)
-        self.log_info(f"EOD: {eod}, request_end: {request_end}")
         await self.tdig_l_minus_tsco
         # At this point target should set SDA to High-Z.
         self.scl = 1
@@ -361,7 +349,6 @@ class I3cController:
         for _ in range(8):
             b = (b << 1) | (1 if await self.recv_bit() else 0)
         self._state = I3cState.TBIT_RD
-        self.log_info("tbi_eod")
         tgt_eod = await self.tbit_eod(request_end=stop)
         return (b, tgt_eod | stop)
 
@@ -518,12 +505,9 @@ class I3cController:
 
     async def _run(self) -> None:
         while True:
-            # self.log.debug("_run loop")
             self.monitor_idle.set()
-            # self.log.debug("monitor is idle")
             if not self.monitor_enable.is_set():
                 await self.monitor_enable.wait()
-            # self.log.debug("monitor is not idle")
             self.monitor_idle.clear()
 
             # Wait for action on the bus
