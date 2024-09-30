@@ -36,7 +36,7 @@ The default values are set to reflect minimal timings on the host controller sid
 Refer to section 6.2 of _MIPI Alliance Specification for I3C Basic Version 1.1.1 (Errata 01)_ for detailed information about timings.
 
 The `speed` parameter of `I3cController` initializer can be used to scale the timings of the device, this includes all the timings defined by `timings` parameter.
-The default value, corresponding to 1:1 scale is `15.5e6`, which corresponds to 15.5MHz clocking speed of I3C.
+The default value, corresponding to 1:1 scale is `12.5e6`, which corresponds to 12.5MHz clocking speed of I3C.
 
 ### Using `I3cController`
 
@@ -57,7 +57,7 @@ The default value, corresponding to 1:1 scale is `15.5e6`, which corresponds to 
 
 All read/write procedures issue a **STOP** condition on the bus by default.
 However it is possible to chain the transfers with repeated start (where applicable).
-In order to doi it, set the `stop` parameter to `False` on any of the read/write procedures.
+In order to do it, set the `stop` parameter to `False` on any of the read/write procedures.
 
 Eg.
 
