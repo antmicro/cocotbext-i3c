@@ -149,3 +149,16 @@ def report_config(speed: float, timings: I3cTimings, log_method: Callable[[str],
     log_method(f"    SDA Set-up time (Push-Pull): {scaled_timing(timings.tsupp)}ns")
     log_method(f"    SDA Hold time (Push-Pull): {scaled_timing(timings.thd)}ns")
     log_method(f"    Clock in to Data Out for Target: {scaled_timing(timings.tsco)}ns")
+
+
+async def with_timeout_event(event, trigger, timeout_in_ns, precision=(100, "ps")):
+    result = None
+    time = timeout_in_ns * 10
+    while event.is_set() and time and result is None:
+        time -= 1
+        try:
+            result = await with_timeout(trigger, *precision)
+        except SimTimeoutError:
+            pass
+
+    return result
