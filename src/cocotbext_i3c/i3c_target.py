@@ -264,9 +264,7 @@ class I3CTarget:
         scl_falling_edge = FallingEdge(self.scl_i)
         result = None
         monitor_enable = self.monitor_enable.is_set()
-        while (
-            (not monitor_enable) or (monitor_enable and self.monitor_enable.is_set())
-        ) and result is None:
+        while (not monitor_enable or self.monitor_enable.is_set()) and result is None:
             try:
                 result = await with_timeout(First(sda_falling_edge, scl_falling_edge), 1, "ns")
             except SimTimeoutError:

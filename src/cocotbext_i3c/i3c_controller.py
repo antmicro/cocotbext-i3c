@@ -170,12 +170,6 @@ class I3cController:
         if not (self.sda and self.scl):
             return None
 
-        # TODO: Add support for repeated start (is it even needed?)
-        if self.bus_active:
-            pass
-        else:
-            pass
-
         sda_falling_edge = FallingEdge(self.sda_i)
         scl_falling_edge = FallingEdge(self.scl_i)
         result = await with_timeout_event(
@@ -371,6 +365,7 @@ class I3cController:
 
     async def recv_until_eod_tbit(self, buf: bytearray, count: int) -> None:
         length = count if (count != 0) else 1
+
         while length:
             length = (length - 1) if (count != 0) else 1
             (byte, stop) = await self.recv_byte_t_bit(stop=(length == 0))
@@ -510,6 +505,11 @@ class I3cController:
         await self.send_stop()
 
     async def _run(self) -> None:
+        """
+        This coroutine is supposed to run in background and observe the bus state. It will not be
+        enabled if there are no input SDA and SCL signals from the DUT. Once it detects the start
+        pattern it processes the following IBI transfer.
+        """
         while True:
             self.monitor_idle.set()
             if not self.monitor_enable.is_set():
