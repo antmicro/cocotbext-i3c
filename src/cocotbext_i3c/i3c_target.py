@@ -435,7 +435,7 @@ class I3CTarget:
         addr_header = await self.recv(bits_num=8)
         addr, is_read = addr_header >> 1, addr_header & 0x1
 
-        self.log.warning(f"TARGET:::Address: {hex(addr)}")
+        self.log.info(f"TARGET:::Address: {hex(addr)} RnW: {is_read}")
 
         if addr == I3C_RSVD_BYTE:
             assert self.header in [I3cHeader.NONE, I3cHeader.READ, I3cHeader.WRITE]
@@ -536,15 +536,15 @@ class I3CTarget:
         await FallingEdge(self.scl_i)
 
         # Send address with RnW bit set to 1'b1
-        terminate = mdb is None and data is None
+        terminate = mdb is None
         next_state = await self.send_byte((self.address << 1) | 1, terminate=terminate)
-        if mdb:
+        if mdb is not None:
             next_state = await self.send_byte(mdb, terminate=bool(not data))
 
-        while data:
-            value = data.pop(0)
-            terminate = not bool(len(data))
-            next_state = await self.send_byte(value, terminate=terminate)
+            while data:
+                value = data.pop(0)
+                terminate = not bool(len(data))
+                next_state = await self.send_byte(value, terminate=terminate)
 
         self.state = next_state
         if self.state == I3cState.STOP:
