@@ -194,6 +194,11 @@ class I3cController:
                 target = i3c_controller.targets[target_idx]
                 target_bcr = target.bcr
             ```
+            or
+            ```
+            target = i3c_controller.add_target(addr)
+            target_bcr = target.bcr
+            ```
         """
         for t in self.targets:
             if t.addr == addr:
@@ -201,7 +206,10 @@ class I3cController:
                     f"Targets with the same addresses are not supported yet (address: {addr})"
                 )
 
-        self.targets.append(Target(addr))
+        target = Target(addr)
+        self.targets.append(target)
+
+        return target
 
     def get_target_idx_by_addr(self, addr):
         """
