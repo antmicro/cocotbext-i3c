@@ -566,6 +566,11 @@ class I3cController:
         return data
 
     async def handle_ibi(self):
+        """
+        Receive and IBI from the target, support for MDB is determined from the `self.targets` list
+        which should be configured by the testbench. If there is no entry for the target with an address
+        received on the bus, assume that the BCR has no set values hence is equal to 0.
+        """
         assert not (self.sda or self.scl)
 
         # Accept the interrupt by sending an ACK
