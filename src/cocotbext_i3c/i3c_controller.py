@@ -34,6 +34,45 @@ class I3cXferMode(Enum):
                 return "Legacy I2C"
 
 
+class Target:
+    addr: int
+    bcr: int
+
+    def __init__(self, addr: int):
+        self.addr = addr
+        self.bcr = 0
+
+    def set_bcr_fields(
+        self,
+        max_data_speed_limitation: bool = None,
+        ibi_req_capable: bool = None,
+        ibi_payload: bool = None,
+        offline_capable: bool = None,
+        virtual_target_support: bool = None,
+        advanced_capabilities: bool = None,
+        device_role: int = None,
+    ):
+        bcr = self.bcr & 0xFF
+
+        # Clear each provided field and set to new value
+        if max_data_speed_limitation:
+            bcr = bcr & (1 << 0) | (max_data_speed_limitation << 0)
+        if ibi_req_capable:
+            bcr = bcr & (1 << 1) | (ibi_req_capable << 1)
+        if ibi_payload:
+            bcr = bcr & (1 << 2) | (ibi_payload << 2)
+        if offline_capable:
+            bcr = bcr & (1 << 3) | (offline_capable << 3)
+        if virtual_target_support:
+            bcr = bcr & (1 << 4) | (virtual_target_support << 4)
+        if advanced_capabilities:
+            bcr = bcr & (1 << 5) | (advanced_capabilities << 5)
+        if device_role:
+            bcr = bcr & (1 << 6) | (device_role << 6)
+
+        self.bcr = bcr
+
+
 class I3cController:
     FULL_SPEED: float = 12.5e6
 
@@ -89,6 +128,7 @@ class I3cController:
 
         self.hold_data = False
 
+        self.targets = []
         self.got_ibi = Event()
 
         super().__init__(*args, **kwargs)
@@ -148,6 +188,34 @@ class I3cController:
     @sda.setter
     def sda(self, value: Any) -> None:
         self.sda_o.value = value
+
+    def add_target(self, addr):
+        """
+        Add a Target to the Controller targets. It can then be accessed with:
+            ```
+            target_idx = i3c_controller.get_target_idx_by_addr(addr)
+            if target_idx is not None:
+                i3c_controller.targets[target_idx].set_bcr_fields()
+                target = i3c_controller.targets[target_idx]
+                target_bcr = target.bcr
+            ```
+        """
+        for t in self.targets:
+            if t.addr == addr:
+                raise Exception(
+                    f"Targets with the same addresses are not supported yet (address: {addr})"
+                )
+
+        self.targets.append(Target(addr))
+
+    def get_target_idx_by_addr(self, addr):
+        """
+        Returns target index in `self.targets` if target was found, returns `None` otherwise.
+        """
+        for i, t in enumerate(self.targets):
+            if t.addr == addr:
+                return i
+        return None
 
     async def take_bus_control(self):
         if not self.monitor:
@@ -366,11 +434,11 @@ class I3cController:
             self.log_info("Address Header:::Got ACK")
 
     async def recv_until_eod_tbit(self, buf: bytearray, count: int) -> None:
-        length = count if (count != 0) else 1
+        length = count if count else 1
 
         while length:
-            length = (length - 1) if (count != 0) else 1
-            (byte, stop) = await self.recv_byte_t_bit(stop=(length == 0))
+            length = (length - 1) if count else 1
+            (byte, stop) = await self.recv_byte_t_bit(stop=not length)
             self.log_info(f"I3C: read byte {hex(byte)}, idx={length}, stop={stop}")
             buf.append(byte)
             if stop:
@@ -502,11 +570,24 @@ class I3cController:
     async def handle_ibi(self):
         assert not (self.sda or self.scl)
 
+        # Accept the interrupt by sending an ACK
+        addr = await self.recv_byte(ack=False) >> 1
+
+        # Receive IBI
         data = bytearray()
-        await self.recv_until_eod_tbit(data, 0)
+        target_idx = self.get_target_idx_by_addr(addr)
+        if target_idx is not None:
+            self.targets[target_idx].set_bcr_fields()
+            target = self.targets[target_idx]
+            mdb_enabled = target.bcr & (1 << 2)
+            if mdb_enabled:
+                await self.recv_until_eod_tbit(data, 0)
+        else:
+            self.log.warning(f"Target ({hex(addr)}) has no configured BCR, assuming BCR = 0")
+
         await self.send_stop()
 
-        self.got_ibi.set(data)
+        self.got_ibi.set(bytearray([addr]) + data)
 
     async def wait_for_ibi(self):
         """

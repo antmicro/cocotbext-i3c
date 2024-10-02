@@ -539,11 +539,11 @@ class I3CTarget:
         terminate = mdb is None
         next_state = await self.send_byte((self.address << 1) | 1, terminate=terminate)
         if mdb is not None:
-            next_state = await self.send_byte(mdb, terminate=bool(not data))
+            next_state = await self.send_byte(mdb, terminate=not data)
 
             while data:
                 value = data.pop(0)
-                terminate = not bool(len(data))
+                terminate = not data
                 next_state = await self.send_byte(value, terminate=terminate)
 
         self.state = next_state
