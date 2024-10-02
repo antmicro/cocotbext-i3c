@@ -16,6 +16,7 @@ from .common import (
     I3cControllerTimings,
     I3cState,
     calculate_tbit,
+    make_timer,
     report_config,
     with_timeout_event,
 )
@@ -102,12 +103,6 @@ class I3cController:
 
         if timings is None:
             timings = I3cControllerTimings()
-
-        def scaled_timing(period_ns: float) -> float:
-            return (12.5e6 / speed) * period_ns
-
-        def make_timer(period_ns: float) -> Timer:
-            return Timer(scaled_timing(period_ns), "ns")
 
         def at_least_tsupp(period_ns: float) -> float:
             return period_ns if period_ns > timings.tsupp else timings.tsupp

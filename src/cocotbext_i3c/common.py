@@ -5,7 +5,7 @@ from enum import IntEnum
 from typing import Callable
 
 from cocotb.result import SimTimeoutError
-from cocotb.triggers import NextTimeStep, with_timeout
+from cocotb.triggers import NextTimeStep, Timer, with_timeout
 from cocotb.utils import _get_log_time_scale, _get_simulator_precision, get_sim_time
 
 I3C_RSVD_BYTE: int = 0x7E
@@ -64,6 +64,14 @@ class I3cControllerTimings(I3cTimings):
 @dataclass
 class I3cTargetTimings(I3cTimings):
     thd: float = 0.0
+
+
+def scaled_timing(period_ns: float, speed: float) -> float:
+    return (12.5e6 / speed) * period_ns
+
+
+def make_timer(period_ns: float, speed: float = FULL_SPEED) -> Timer:
+    return Timer(scaled_timing(period_ns, speed), "ns")
 
 
 def calculate_tbit(value: int) -> bool:
@@ -127,9 +135,6 @@ async def check_hold(signals, timeout, units="ns"):
 
 
 def report_config(speed: float, timings: I3cTimings, log_method: Callable[[str], None]) -> str:
-    def scaled_timing(period_ns: float) -> float:
-        return (12.5e6 / speed) * period_ns
-
     if isinstance(timings, I3cControllerTimings):
         mode = "Controller"
     elif isinstance(timings, I3cTargetTimings):
@@ -138,17 +143,21 @@ def report_config(speed: float, timings: I3cTimings, log_method: Callable[[str],
     log_method(f"I3C {mode} configuration:")
     log_method(f"  Rate: {speed / 1000.0}kHz " f"({100.0 * speed / FULL_SPEED}%)")
     log_method("  Timings:")
-    log_method(f"    SCL Clock High Period: {scaled_timing(timings.tdig_h)}ns")
-    log_method(f"    SCL Clock Low Period: {scaled_timing(timings.tdig_l)}ns")
-    log_method(f"    Clock After START (S) Condition: {scaled_timing(timings.tcas)}ns")
-    log_method(f"    Clock Before STOP (P) Condition: {scaled_timing(timings.tcbp)}ns")
-    log_method(f"    Clock Before Repeated START (Sr) Condition: {scaled_timing(timings.tcbsr)}ns")
-    log_method(f"    Clock After Repeated START (Sr) Condition: {scaled_timing(timings.tcasr)}ns")
-    log_method(f"    Bus Free condition: {scaled_timing(timings.tfree)}ns")
-    log_method(f"    Open-drain set-up time: {scaled_timing(timings.tsu_od)}ns")
-    log_method(f"    SDA Set-up time (Push-Pull): {scaled_timing(timings.tsupp)}ns")
-    log_method(f"    SDA Hold time (Push-Pull): {scaled_timing(timings.thd)}ns")
-    log_method(f"    Clock in to Data Out for Target: {scaled_timing(timings.tsco)}ns")
+    log_method(f"    SCL Clock High Period: {scaled_timing(timings.tdig_h, speed)}ns")
+    log_method(f"    SCL Clock Low Period: {scaled_timing(timings.tdig_l, speed)}ns")
+    log_method(f"    Clock After START (S) Condition: {scaled_timing(timings.tcas, speed)}ns")
+    log_method(f"    Clock Before STOP (P) Condition: {scaled_timing(timings.tcbp, speed)}ns")
+    log_method(
+        f"    Clock Before Repeated START (Sr) Condition: {scaled_timing(timings.tcbsr, speed)}ns"
+    )
+    log_method(
+        f"    Clock After Repeated START (Sr) Condition: {scaled_timing(timings.tcasr, speed)}ns"
+    )
+    log_method(f"    Bus Free condition: {scaled_timing(timings.tfree, speed)}ns")
+    log_method(f"    Open-drain set-up time: {scaled_timing(timings.tsu_od, speed)}ns")
+    log_method(f"    SDA Set-up time (Push-Pull): {scaled_timing(timings.tsupp, speed)}ns")
+    log_method(f"    SDA Hold time (Push-Pull): {scaled_timing(timings.thd, speed)}ns")
+    log_method(f"    Clock in to Data Out for Target: {scaled_timing(timings.tsco, speed)}ns")
 
 
 async def with_timeout_event(event, trigger, timeout_in_ns, precision=(100, "ps")):
