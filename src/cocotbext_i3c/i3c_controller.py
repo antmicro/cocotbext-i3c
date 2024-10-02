@@ -372,12 +372,14 @@ class I3cController:
         self._state = I3cState.ACK
         return await self.recv_bit_od()
 
-    async def recv_byte(self, ack: bool) -> int:
+    async def recv_byte(self, send_ack: bool) -> int:
         b = 0
         self._state = I3cState.DATA_RD
         for _ in range(8):
             b = (b << 1) | await self.recv_bit()
         self._state = I3cState.ACK
+        # ACK is indicated by pulling SDA low
+        ack = not send_ack
         await self.send_bit(ack)
         return b
 
@@ -489,7 +491,8 @@ class I3cController:
                 await self.recv_until_eod_tbit(data, count)
             case I3cXferMode.LEGACY_I2C:
                 for i in range(count):
-                    data.append(await self.recv_byte(i == count - 1))
+                    send_ack = not (i == count - 1)
+                    data.append(await self.recv_byte(send_ack))
         if stop:
             await self.send_stop()
 
@@ -571,7 +574,7 @@ class I3cController:
         assert not (self.sda or self.scl)
 
         # Accept the interrupt by sending an ACK
-        addr = await self.recv_byte(ack=False) >> 1
+        addr = await self.recv_byte(send_ack=True) >> 1
 
         # Receive IBI
         data = bytearray()
