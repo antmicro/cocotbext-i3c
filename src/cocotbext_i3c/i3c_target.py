@@ -24,6 +24,7 @@ from .common import (
     calculate_tbit,
     check_hold,
     check_in_time,
+    make_timer,
     report_config,
     with_timeout_event,
 )
@@ -167,6 +168,7 @@ class I3CTarget:
         if timings is None:
             timings = I3cTargetTimings()
         self.timings = timings
+        self.tsu_od = make_timer(timings.tsu_od)
 
         if address is not None:
             self.log.info(f"TARGET:::Using static address for I3C Target: {hex(address)}")
@@ -534,6 +536,7 @@ class I3CTarget:
 
         # For now expect IBI accept but the controller can also NACK
         await FallingEdge(self.scl_i)
+        await self.tsu_od
 
         # Send address with RnW bit set to 1'b1
         terminate = mdb is None

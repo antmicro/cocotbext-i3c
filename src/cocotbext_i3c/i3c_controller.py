@@ -248,7 +248,7 @@ class I3cController:
 
         await self.tcas
         self.scl = 0
-        await self.tdig_l
+        await self.tsu_od
 
         return I3cState.START
 
