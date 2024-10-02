@@ -15,7 +15,7 @@ def add_target_bcr_mdb(tb, tgt_address, mdb_enabled):
 
 @cocotb.test()
 async def test_simple_ibi(dut):
-    tgt_address = 0x2A
+    tgt_address = 0x55
     tb = I3cTestbench(dut, tgt_address)
     add_target_bcr_mdb(tb, tgt_address, mdb_enabled=False)
 
@@ -26,7 +26,7 @@ async def test_simple_ibi(dut):
 
 @cocotb.test()
 async def test_simple_ibi_mdb(dut):
-    tgt_address = 0x2A
+    tgt_address = 0x55
     tb = I3cTestbench(dut, tgt_address)
     add_target_bcr_mdb(tb, tgt_address, mdb_enabled=True)
 
@@ -37,7 +37,7 @@ async def test_simple_ibi_mdb(dut):
 
 @cocotb.test()
 async def test_simple_ibi_data(dut):
-    tgt_address = 0x2A
+    tgt_address = 0x55
     tb = I3cTestbench(dut, tgt_address)
     add_target_bcr_mdb(tb, tgt_address, mdb_enabled=True)
 
@@ -48,7 +48,7 @@ async def test_simple_ibi_data(dut):
 
 @cocotb.test()
 async def test_simple_ibi_data_no_mdb(dut):
-    tgt_address = 0x2A
+    tgt_address = 0x55
     tb = I3cTestbench(dut, tgt_address)
     add_target_bcr_mdb(tb, tgt_address, mdb_enabled=False)
 
