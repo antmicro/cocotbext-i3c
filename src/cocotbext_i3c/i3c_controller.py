@@ -285,11 +285,12 @@ class I3cController:
             for addr, def_byte in def_bytes:
                 yield def_byte, [addr]
 
-    async def send_start(self) -> None:
+    async def send_start(self, pull_scl_low: bool = True) -> None:
         if self.bus_active:
             clock_after_data_t = self.tcasr
             self._state = I3cState.RS
-            self.scl = 0
+            if pull_scl_low:
+                self.scl = 0
             await self.thd
             self.sda = 1
             await self.tdig_l_minus_thd
@@ -306,18 +307,20 @@ class I3cController:
 
         self.sda = 0
         await clock_after_data_t
-        self.scl = 0
+        if pull_scl_low:
+            self.scl = 0
         await self.tcasr
 
         self.hold_data = False
 
-    async def send_stop(self) -> None:
+    async def send_stop(self, pull_scl_low: bool = True) -> None:
         self.log_info("I3C: STOP")
         self._state = I3cState.STOP
         if not self.bus_active:
             return
 
-        self.scl = 0
+        if pull_scl_low:
+            self.scl = 0
         await self._hold_data()
         self.sda = 0
         await self.remaining_tlow
@@ -482,8 +485,8 @@ class I3cController:
         self.scl = 1
 
         await self.tdig_h
-        await self.send_start()
-        await self.send_stop()
+        await self.send_start(pull_scl_low=False)
+        await self.send_stop(pull_scl_low=False)
 
         if max_timing != 0:
             await Timer(max_timing, "ns")
