@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import random
+import logging
 
 import crc
 
 from .i3c_controller import I3cController
+from .common import I3C_RSVD_BYTE
 
 
 class I3cRecoveryException(RuntimeError):
@@ -50,6 +52,8 @@ class I3cRecoveryInterface:
         INDIRECT_FIFO_DATA = 47
 
     def __init__(self, controller: I3cController):
+        self.log = logging.getLogger(f"cocotb.{controller.sda_o._path}")
+        self.log.setLevel("DEBUG")
         self.controller = controller
 
         # Initialize PEC calculator
@@ -73,40 +77,59 @@ class I3cRecoveryInterface:
         """
 
         # Begin I3C read
+        await self.controller.take_bus_control()
+
+        await self.controller.send_start()
+        await self.controller.write_addr_header(I3C_RSVD_BYTE)
         await self.controller.send_start()
         await self.controller.write_addr_header(address, read=True)
+
+        prtocol_error = False
 
         # Read length
         len_bytes = []
         for i in range(2):
             byte, stop = await self.controller.recv_byte_t_bit(stop=False)
             len_bytes.append(byte)
+            self.log.debug(f"Recovery Rx: byte[{i}]: 0x{byte:02X} (stop={int(stop)})")
 
             # Length is mandatory. If the transfer gets terminated raise an
             # exception.
             if stop:
-                raise I3cRecoveryException
+                self.log.error(f"Target requested stop at byte {i}")
+                protocol_error = True
+                #self.controller.give_bus_control()
+                #raise I3cRecoveryException
 
         length = (len_bytes[1] << 8) | len_bytes[0]
 
-        # Read data
+        # Read data. Raise an exception in case of an unexpected stop
         data = []
         for i in range(length):
             byte, stop = await self.controller.recv_byte_t_bit(stop=False)
             data.append(byte)
 
             if stop:
-                break
+                self.log.error(f"Target requested stop at byte {i+2}")
+                protocol_error = True
+                #self.controller.give_bus_control()
+                #raise I3cRecoveryException
 
-        # Read PEC. This is mandatory as well so raise an exception in case
-        # of an unexpected stop
+        # Read PEC. Expect stop at this byte
         pec_recv, stop = await self.controller.recv_byte_t_bit(stop=True)
-        if stop:
+        if not stop:
+            self.log.error(f"Target wishes to transfer more data after PEC")
+            protocol_error = True
+            #self.controller.give_bus_control()
+            #raise I3cRecoveryException
+
+        self.controller.give_bus_control()
+
+        if protocol_error:
             raise I3cRecoveryException
 
         # Compute reference PEC checksum
-        # FIXME: Supposedly I3C address should be included in PEC calculation as well
-        pec_calc = int(self.pec_calc.checksum(bytes(len_bytes + data)))
+        pec_calc = int(self.pec_calc.checksum(bytes([(address << 1) | 1] + len_bytes + data)))
 
         # Return the data and received PEC validity
         return data, (pec_recv == pec_calc)
@@ -130,8 +153,7 @@ class I3cRecoveryInterface:
         xfer.extend(data)
 
         # Compute PEC
-        # FIXME: Supposedly I3C address should be included in PEC calculation as well
-        pec = int(self.pec_calc.checksum(bytes(xfer)))
+        pec = int(self.pec_calc.checksum(bytes([address << 1] + xfer)))
 
         # Inject incorrect PEC
         if force_pec_error:
@@ -151,8 +173,7 @@ class I3cRecoveryInterface:
         xfer = [command]
 
         # Compute PEC
-        # FIXME: Supposedly I3C address should be included in PEC calculation as well
-        pec = int(self.pec_calc.checksum(bytes(xfer)))
+        pec = int(self.pec_calc.checksum(bytes([address << 1] + xfer)))
 
         # Inject incorrect PEC
         if force_pec_error:
