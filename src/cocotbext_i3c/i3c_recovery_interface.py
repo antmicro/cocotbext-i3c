@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import random
 import logging
+import random
 
 import crc
+from cocotb.triggers import Timer
 
-from .i3c_controller import I3cController
 from .common import I3C_RSVD_BYTE
+from .i3c_controller import I3cController
 
 
 class I3cRecoveryException(RuntimeError):
@@ -84,49 +85,47 @@ class I3cRecoveryInterface:
         await self.controller.send_start()
         await self.controller.write_addr_header(address, read=True)
 
-        prtocol_error = False
+        try:
 
-        # Read length
-        len_bytes = []
-        for i in range(2):
-            byte, stop = await self.controller.recv_byte_t_bit(stop=False)
-            len_bytes.append(byte)
-            self.log.debug(f"Recovery Rx: byte[{i}]: 0x{byte:02X} (stop={int(stop)})")
+            # Read length
+            len_bytes = []
+            for i in range(2):
+                byte, stop = await self.controller.recv_byte_t_bit(stop=False)
+                len_bytes.append(byte)
+                self.log.debug(f"Recovery Rx: byte[{i}]: 0x{byte:02X} (stop={int(stop)})")
 
-            # Length is mandatory. If the transfer gets terminated raise an
-            # exception.
-            if stop:
-                self.log.error(f"Target requested stop at byte {i}")
-                protocol_error = True
-                #self.controller.give_bus_control()
-                #raise I3cRecoveryException
+                # Length is mandatory. If the transfer gets terminated raise an
+                # exception.
+                if stop:
+                    self.log.error(f"Target requested stop at byte {i}")
+                    raise I3cRecoveryException
 
-        length = (len_bytes[1] << 8) | len_bytes[0]
+            length = (len_bytes[1] << 8) | len_bytes[0]
+            self.log.debug(f"Recovery Rx: Payload length is {length}B")
 
-        # Read data. Raise an exception in case of an unexpected stop
-        data = []
-        for i in range(length):
-            byte, stop = await self.controller.recv_byte_t_bit(stop=False)
-            data.append(byte)
+            # Read data. Raise an exception in case of an unexpected stop
+            data = []
+            for i in range(length):
+                byte, stop = await self.controller.recv_byte_t_bit(stop=False)
+                data.append(byte)
+                self.log.debug(f"Recovery Rx: byte[{i + 2}]: 0x{byte:02X} (stop={int(stop)})")
 
-            if stop:
-                self.log.error(f"Target requested stop at byte {i+2}")
-                protocol_error = True
-                #self.controller.give_bus_control()
-                #raise I3cRecoveryException
+                if stop:
+                    self.log.error(f"Target requested stop at byte {i + 2}")
+                    raise I3cRecoveryException
 
-        # Read PEC. Expect stop at this byte
-        pec_recv, stop = await self.controller.recv_byte_t_bit(stop=True)
-        if not stop:
-            self.log.error(f"Target wishes to transfer more data after PEC")
-            protocol_error = True
-            #self.controller.give_bus_control()
-            #raise I3cRecoveryException
+            # Read PEC. Expect stop at this byte
+            pec_recv, stop = await self.controller.recv_byte_t_bit(stop=True)
+            if not stop:
+                self.log.error("Target wishes to transfer more data after PEC")
+                raise I3cRecoveryException
+
+        # In case of a protocol error wait some time and then re-throw
+        except I3cRecoveryException:
+            await Timer(1, "us")
+            raise
 
         self.controller.give_bus_control()
-
-        if protocol_error:
-            raise I3cRecoveryException
 
         # Compute reference PEC checksum
         pec_calc = int(self.pec_calc.checksum(bytes([(address << 1) | 1] + len_bytes + data)))
