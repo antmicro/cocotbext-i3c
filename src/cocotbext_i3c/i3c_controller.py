@@ -120,6 +120,7 @@ class I3cController:
         self.tcasr = make_timer(timings.tcasr)
         self.tfree = make_timer(timings.tfree)
         self.tsco = make_timer(timings.tsco)
+        self.tsu_pp = make_timer(timings.tsu_od)
 
         self.hold_data = False
 
@@ -398,6 +399,7 @@ class I3cController:
     async def tbit_eod(self, request_end: bool) -> bool:
         self.scl = 0
         await self.tsco
+        await self.tsu_pp
         eod = not bool(self.sda)
         await self.tdig_l_minus_tsco
         # At this point target should set SDA to High-Z.
