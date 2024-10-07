@@ -446,7 +446,6 @@ class I3cController:
         while length:
             length = (length - 1) if count else 1
             (byte, stop) = await self.recv_byte_t_bit(stop=not length)
-            self.log_info(f"I3C: read byte {hex(byte)}, idx={length}, stop={stop}")
             buf.append(byte)
             if stop:
                 return
