@@ -9,7 +9,7 @@ from typing import Any, Callable, Iterable, Optional, TypeVar, Union
 
 import cocotb
 from cocotb.handle import ModifiableObject
-from cocotb.triggers import Event, FallingEdge, First, NextTimeStep, Timer
+from cocotb.triggers import Event, FallingEdge, First, NextTimeStep, RisingEdge, Timer
 
 from .common import (
     I3C_RSVD_BYTE,
@@ -262,7 +262,10 @@ class I3cController:
         if result != sda_falling_edge:
             return None
 
-        await self.tcas
+        sda_rising_edge = RisingEdge(self.sda_i)
+        if await First(self.tcas, sda_rising_edge, scl_falling_edge) != self.tcas:
+            # Timing requirement for SDA low has not been met
+            return None
         self.scl = 0
         await self.tsu_od
 
