@@ -138,10 +138,10 @@ class I3cController:
         self._state_ = I3cState.FREE
         self._state = I3cState.FREE
 
-        self.interpret_target_peripheral_reset_timing_ns: Callable[[int], int] = lambda _: 1000000
-        self.interpret_target_whole_reset_timing_ns: Callable[[int], int] = lambda _: 1000000000
+        self.interpret_target_peripheral_reset_timing_ns: Callable[[int], int] = lambda _: 1e6
+        self.interpret_target_whole_reset_timing_ns: Callable[[int], int] = lambda _: 1e9
         self.interpret_target_net_adapter_reset_timing_ns: Callable[[int], int] = \
-            lambda _: 1000000000000
+            lambda _: 1e12
 
         report_config(self.speed, timings, lambda x: self.log_info(x))
 
@@ -348,6 +348,29 @@ class I3cController:
         await self.send_stop()
         self.give_bus_control()
 
+    async def send_target_reset_pattern(self, timing) -> None:
+        await self.take_bus_control()
+        self._state = I3cState.TARGET_RESET
+
+        sda = 1
+        self.sda = sda
+        self.scl = 0
+        for _ in range(14):
+            await self.tdig_h
+            sda = 0 if (sda != 0) else 1
+            self.sda = sda
+        await self.tdig_h
+        self.scl = 1
+
+        await self.tdig_h
+        await self.send_start(pull_scl_low=False)
+        await self.send_stop(pull_scl_low=False)
+
+        if timing != 0:
+            await Timer(timing, "ns")
+        # TODO: Send start and I3C address header?
+        self.give_bus_control()
+
     async def target_reset(
         self,
         reset_actions: Union[Iterable[tuple[int, I3cTargetResetAction]],
@@ -356,6 +379,33 @@ class I3cController:
         assumed_default_action: I3cTargetResetAction = I3cTargetResetAction.RESET_PERIPHERAL_ONLY,
         merge_ccc_actions = True
     ) -> None:
+        """
+        Several scenarios are supported.
+        Reset with default configuration, eg:
+        ```
+            await i3c_controller.target_reset()
+        ```
+
+        Reset with broadcasted configuration, eg:
+        ```
+            await i3c_controller.target_reset(
+                reset_actions=I3cTargetResetAction.RESET_PERIPHERAL_ONLY
+            )
+        ```
+        Reset with direct configuration for given addresses, eg:
+        ```
+            await tb.i3c_controller.target_reset(
+                reset_actions=[
+                    (0x20, I3cTargetResetAction.RESET_PERIPHERAL_ONLY),
+                    (0x21, I3cTargetResetAction.RESET_WHOLE_TARGET),
+                    (0x22, I3cTargetResetAction.RESET_WHOLE_TARGET)
+                ]
+            )
+        ```
+
+        Same direct configurations get merged into a single CCC by default, but it can be disabled
+        with `merge_ccc_actions=False`.
+        """
         if reset_actions is None:
             await self.send_start()
 
@@ -436,7 +486,7 @@ class I3cController:
         # Query and calculate reset time
 
         max_timing = 0
-        # TODO: exapnd semantics of i3c_ccc_read to allow querying multiple addresses
+        # TODO: expand semantics of i3c_ccc_read to allow querying multiple addresses
         # within a single CCC
         for address, def_byte in queries:
             # TODO: Handle NACKs
@@ -461,6 +511,7 @@ class I3cController:
                 max_timing = timing_ns
 
         # Finish sending CCCs without closing the frame
+        await self.take_bus_control()
         match last_ccc:
             case "none": pass
             case "broadcast":
@@ -469,29 +520,9 @@ class I3cController:
                 await self.send_start()
                 await self.write_addr_header(I3C_RSVD_BYTE)
                 await self.send_start()
+        self.give_bus_control()
 
-        # Send target reset pattern
-
-        self._state = I3cState.TARGET_RESET
-
-        sda = 1
-        self.sda = sda
-        self.scl = 0
-        for _ in range(14):
-            await self.tdig_h
-            sda = 0 if (sda != 0) else 1
-            self.sda = sda
-        await self.tdig_h
-        self.scl = 1
-
-        await self.tdig_h
-        await self.send_start(pull_scl_low=False)
-        await self.send_stop(pull_scl_low=False)
-
-        if max_timing != 0:
-            await Timer(max_timing, "ns")
-        # TODO: Send start and I3C address header?
-
+        await self.send_target_reset_pattern(max_timing)
 
     async def send_bit(self, b: bool) -> None:
         if not self.bus_active:
