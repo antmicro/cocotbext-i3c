@@ -15,17 +15,17 @@ async def test_simple_broadcast_default_target_reset(dut):
 
     await Timer(500, "ns")
 
+
 @cocotb.test()
 async def test_simple_broadcast_target_reset(dut):
     address = 0x40
     tb = I3cTestbench(dut, address)
 
     # Should broadcast configuration and send trarget reset pattern
-    await tb.i3c_controller.target_reset(
-        reset_actions=I3cTargetResetAction.RESET_PERIPHERAL_ONLY
-    )
+    await tb.i3c_controller.target_reset(reset_actions=I3cTargetResetAction.RESET_PERIPHERAL_ONLY)
 
     await Timer(500, "ns")
+
 
 @cocotb.test()
 async def test_multiple_direct_target_reset(dut):
@@ -38,7 +38,7 @@ async def test_multiple_direct_target_reset(dut):
         reset_actions=[
             (0x20, I3cTargetResetAction.RESET_PERIPHERAL_ONLY),
             (0x21, I3cTargetResetAction.RESET_WHOLE_TARGET),
-            (0x22, I3cTargetResetAction.RESET_WHOLE_TARGET)
+            (0x22, I3cTargetResetAction.RESET_WHOLE_TARGET),
         ]
     )
 

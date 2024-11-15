@@ -24,6 +24,7 @@ from .common import (
 
 _T = TypeVar("_T")
 
+
 class I3cXferMode(Enum):
     PRIVATE = 0
     LEGACY_I2C = 1
@@ -140,8 +141,7 @@ class I3cController:
 
         self.interpret_target_peripheral_reset_timing_ns: Callable[[int], int] = lambda _: 1e6
         self.interpret_target_whole_reset_timing_ns: Callable[[int], int] = lambda _: 1e9
-        self.interpret_target_net_adapter_reset_timing_ns: Callable[[int], int] = \
-            lambda _: 1e12
+        self.interpret_target_net_adapter_reset_timing_ns: Callable[[int], int] = lambda _: 1e12
 
         report_config(self.speed, timings, lambda x: self.log_info(x))
 
@@ -272,8 +272,7 @@ class I3cController:
         return I3cState.START
 
     def _ccc_addresses_for_def_byte(
-        def_bytes: Iterable[tuple[int, _T]],
-        merge: bool = True
+        def_bytes: Iterable[tuple[int, _T]], merge: bool = True
     ) -> Iterable[tuple[_T, list[int]]]:
         if merge:
             merged: dict[_T, list[int]] = {}
@@ -376,11 +375,12 @@ class I3cController:
 
     async def target_reset(
         self,
-        reset_actions: Union[Iterable[tuple[int, I3cTargetResetAction]],
-                             I3cTargetResetAction, None] = None,
+        reset_actions: Union[
+            Iterable[tuple[int, I3cTargetResetAction]], I3cTargetResetAction, None
+        ] = None,
         query_timings: Union[bool, Iterable[int]] = False,
         assumed_default_action: I3cTargetResetAction = I3cTargetResetAction.RESET_PERIPHERAL_ONLY,
-        merge_ccc_actions = True
+        merge_ccc_actions=True,
     ) -> None:
         """
         Several scenarios are supported.
@@ -419,32 +419,30 @@ class I3cController:
         match reset_actions:
             case I3cTargetResetAction():
                 # Broadcast RSTACT
-                await self.i3c_ccc_write(
-                    ccc=0x2A,
-                    defining_byte=reset_actions,
-                    stop=False
-                )
+                await self.i3c_ccc_write(ccc=0x2A, defining_byte=reset_actions, stop=False)
                 last_ccc = "broadcast"
-            case None: pass
-            case _: # Assume iterable
+            case None:
+                pass
+            case _:  # Assume iterable
                 # Directed RSTACT
                 for reset_action, addresses in I3cController._ccc_addresses_for_def_byte(
-                    def_bytes=reset_actions,
-                    merge=merge_ccc_actions
+                    def_bytes=reset_actions, merge=merge_ccc_actions
                 ):
                     print(f"Reset action {reset_action} for {addresses}")
                     await self.i3c_ccc_write(
                         ccc=0x9A,
                         defining_byte=reset_action,
                         directed_data=map(lambda addr: (addr, []), addresses),
-                        stop=False
+                        stop=False,
                     )
                     last_ccc = "direct"
 
         queries: list[tuple[int, int]] = []
+
         def add_timing_query_for_reset_action(addr: int, action: I3cTargetResetAction):
             match action:
-                case I3cTargetResetAction.NO_RESET: pass
+                case I3cTargetResetAction.NO_RESET:
+                    pass
                 case I3cTargetResetAction.RESET_PERIPHERAL_ONLY:
                     queries.append((addr, 0x81))
                 case I3cTargetResetAction.RESET_WHOLE_TARGET:
@@ -452,20 +450,21 @@ class I3cController:
                 case I3cTargetResetAction.DEBUG_NETWORK_ADAPTER_RESET:
                     queries.append((addr, 0x83))
                 case _:
-                    raise RuntimeError("Unsupported reset action for timing query: "
-                                        f"`{action}`")
+                    raise RuntimeError("Unsupported reset action for timing query: " f"`{action}`")
 
         # Prepare RSTACT queries
 
         match query_timings, reset_actions:
-            case False, _: pass
+            case False, _:
+                pass
             case True, I3cTargetResetAction():
-                raise RuntimeError("query_timings can't be used without "
-                                    "specifying reset targets")
-            case True, _: # Assume Iterable
+                raise RuntimeError(
+                    "query_timings can't be used without " "specifying reset targets"
+                )
+            case True, _:  # Assume Iterable
                 for addr, action in reset_actions:
                     add_timing_query_for_reset_action(addr, action)
-            case _, _: # Assume Iterable
+            case _, _:  # Assume Iterable
                 addr_actions: dict[int, list[I3cTargetResetAction]] = {}
                 for address, action in reset_actions:
                     if addr_actions.get(address) is None:
@@ -479,10 +478,10 @@ class I3cController:
                             add_timing_query_for_reset_action(address, action)
                     else:
                         add_timing_query_for_reset_action(address, assumed_default_action)
-            case _, I3cTargetResetAction(): # Assume Iterable
+            case _, I3cTargetResetAction():  # Assume Iterable
                 for address in query_timings:
                     add_timing_query_for_reset_action(address, reset_actions)
-            case _, None: # Assume Iterable
+            case _, None:  # Assume Iterable
                 for address in query_timings:
                     add_timing_query_for_reset_action(address, assumed_default_action)
 
@@ -494,10 +493,7 @@ class I3cController:
         for address, def_byte in queries:
             # TODO: Handle NACKs
             timing_v = await self.i3c_ccc_read(
-                ccc=0x2A,
-                addr=address,
-                count=1,
-                defining_byte=def_byte
+                ccc=0x2A, addr=address, count=1, defining_byte=def_byte
             )[0]
 
             last_ccc = "direct"
@@ -516,7 +512,8 @@ class I3cController:
         # Finish sending CCCs without closing the frame
         await self.take_bus_control()
         match last_ccc:
-            case "none": pass
+            case "none":
+                pass
             case "broadcast":
                 await self.send_start()
             case "direct":
