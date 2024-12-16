@@ -114,7 +114,6 @@ class I3cController:
         self.thd = make_timer(timings.thd)
         self.tdig_l = make_timer(at_least_tsupp(timings.tdig_l))
         self.tdig_l_minus_thd = make_timer(at_least_tsupp(timings.tdig_l - timings.thd))
-        self.tdig_l_minus_tsco = make_timer(at_least_tsupp(timings.tdig_l - timings.tsco))
         self.tsu_od = make_timer(timings.tsu_od)
         self.tcas = make_timer(timings.tcas)
         self.tcbp = make_timer(timings.tcbp)
@@ -601,10 +600,8 @@ class I3cController:
 
     async def tbit_eod(self, request_end: bool) -> bool:
         self.scl = 0
-        await self.tsco
-        await self.tsu_pp
+        await self.tdig_l
         eod = not bool(self.sda)
-        await self.tdig_l_minus_tsco
         # At this point target should set SDA to High-Z.
         self.scl = 1
         if eod:  # Target requests end-of-data
