@@ -152,6 +152,9 @@ class I3cController:
             self.monitor = True
             cocotb.start_soon(self._run())
 
+        self.nack_ibis = Event()
+        self.max_ibi_data_len = 65536 # This is the max value that can be set.
+
     def log_info(self, *args):
         if self.silent:
             return
@@ -773,7 +776,7 @@ class I3cController:
         self.give_bus_control()
         return data
 
-    async def handle_ibi(self):
+    async def _handle_ibi(self):
         """
         Receive and IBI from the target, support for MDB is determined from the `self.targets` list
         which should be configured by the testbench. If there is no entry for the target with an address
@@ -781,24 +784,49 @@ class I3cController:
         """
         assert not (self.sda or self.scl)
 
-        # Accept the interrupt by sending an ACK
-        addr = await self.recv_byte(send_ack=True) >> 1
+        # Accept/reject the interrupt by sending an ACK/NACK
+        ack  = not self.nack_ibis.is_set()
+        addr = await self.recv_byte(send_ack=ack) >> 1
 
         # Receive IBI
         data = bytearray()
-        target_idx = self.get_target_idx_by_addr(addr)
-        if target_idx is not None:
-            self.targets[target_idx].set_bcr_fields()
-            target = self.targets[target_idx]
-            mdb_enabled = target.bcr & (1 << 2)
-            if mdb_enabled:
-                await self.recv_until_eod_tbit(data, 0)
+        if ack:
+            self.log.info(f"ACK-ed an IBI from 0x{addr:02X}")
+            target_idx = self.get_target_idx_by_addr(addr)
+            if target_idx is not None:
+                self.targets[target_idx].set_bcr_fields()
+                target = self.targets[target_idx]
+                mdb_enabled = target.bcr & (1 << 2)
+                if mdb_enabled:
+                    await self.recv_until_eod_tbit(data, self.max_ibi_data_len + 1)
+                    self.log.info(f"IBI MDB: 0x{data[0]:02X}, data: [" + \
+                        " ".join([f"0x{d:02X}" for d in data[1:]]) + "]")
+            else:
+                self.log.warning(f"Target ({hex(addr)}) has no configured BCR, assuming BCR = 0")
         else:
-            self.log.warning(f"Target ({hex(addr)}) has no configured BCR, assuming BCR = 0")
+            self.log.info(f"NACK-ed an IBI from 0x{addr:02X}")
 
+        # Send stop
         await self.send_stop()
 
-        self.got_ibi.set(bytearray([addr]) + data)
+        if ack:
+            self.got_ibi.set(bytearray([addr]) + data)
+
+    def enable_ibi(self, enable):
+        """
+        Enables/disables ACK-ing IBIs
+        """
+        if enable:
+            self.nack_ibis.clear()
+        else:
+            self.nack_ibis.set()
+
+    def set_max_ibi_data_len(self, max_len):
+        """
+        Sets the maximum number of IBI data bytes that follow MDB. Beyond the
+        given count the controller will terminate IBI with stop.
+        """
+        self.max_ibi_data_len = max_len
 
     async def wait_for_ibi(self):
         """
@@ -825,6 +853,6 @@ class I3cController:
             next_state = await self.check_start()
 
             if next_state == I3cState.START:
-                await self.handle_ibi()
+                await self._handle_ibi()
 
             await NextTimeStep()
