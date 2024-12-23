@@ -592,14 +592,14 @@ class I3cController:
         await self.send_bit(ack)
         return b
 
-    async def send_byte_tbit(self, b: int) -> None:
+    async def send_byte_tbit(self, b: int, inject_tbit_err : bool = False) -> None:
         self.log_info(f"Controller:::Send byte {b}")
         self._state = I3cState.DATA_WR
         for i in range(8):
             await self.send_bit(bool(b & (1 << (7 - i))))
         # Send T-Bit
         self._state = I3cState.TBIT_WR
-        await self.send_bit(calculate_tbit(b))
+        await self.send_bit(calculate_tbit(b, inject_tbit_err))
 
     async def tbit_eod(self, request_end: bool) -> bool:
         self.scl = 0
@@ -659,6 +659,7 @@ class I3cController:
         data: Iterable[int],
         stop: bool = True,
         mode: I3cXferMode = I3cXferMode.PRIVATE,
+        inject_tbit_err : bool = False,
     ) -> None:
         """I3C Private Write transfer"""
         await self.take_bus_control()
@@ -671,7 +672,7 @@ class I3cController:
         for i, d in enumerate(data):
             match mode:
                 case I3cXferMode.PRIVATE:
-                    await self.send_byte_tbit(d)
+                    await self.send_byte_tbit(d, inject_tbit_err)
                 case I3cXferMode.LEGACY_I2C:
                     await self.send_byte(d)
             self.log_info(f"I3C: wrote byte {hex(d)}, idx={i}")

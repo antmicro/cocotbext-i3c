@@ -75,14 +75,14 @@ def make_timer(period_ns: float, speed: float = FULL_SPEED) -> Timer:
     return Timer(scaled_timing(period_ns, speed), "ns")
 
 
-def calculate_tbit(value: int) -> bool:
+def calculate_tbit(value: int, inject_tbit_err : bool = False) -> bool:
     """Calculates odd-parity for `value` to be written by the controller after `value`."""
     tbit = True
     while value != 0:
         if (value & 1) != 0:
             tbit = not tbit
         value >>= 1
-    return tbit
+    return not tbit if inject_tbit_err else tbit
 
 
 def round_time_to_sim_precision(time, units="ns"):
