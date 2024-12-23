@@ -153,7 +153,7 @@ class I3cController:
             cocotb.start_soon(self._run())
 
         self.nack_ibis = Event()
-        self.max_ibi_data_len = 65536 # This is the max value that can be set.
+        self.max_ibi_data_len = 65536  # This is the max value that can be set.
 
     def log_info(self, *args):
         if self.silent:
@@ -592,7 +592,7 @@ class I3cController:
         await self.send_bit(ack)
         return b
 
-    async def send_byte_tbit(self, b: int, inject_tbit_err : bool = False) -> None:
+    async def send_byte_tbit(self, b: int, inject_tbit_err: bool = False) -> None:
         self.log_info(f"Controller:::Send byte {b}")
         self._state = I3cState.DATA_WR
         for i in range(8):
@@ -659,7 +659,7 @@ class I3cController:
         data: Iterable[int],
         stop: bool = True,
         mode: I3cXferMode = I3cXferMode.PRIVATE,
-        inject_tbit_err : bool = False,
+        inject_tbit_err: bool = False,
     ) -> None:
         """I3C Private Write transfer"""
         await self.take_bus_control()
@@ -786,7 +786,7 @@ class I3cController:
         assert not (self.sda or self.scl)
 
         # Accept/reject the interrupt by sending an ACK/NACK
-        ack  = not self.nack_ibis.is_set()
+        ack = not self.nack_ibis.is_set()
         addr = await self.recv_byte(send_ack=ack) >> 1
 
         # Receive IBI
@@ -800,8 +800,11 @@ class I3cController:
                 mdb_enabled = target.bcr & (1 << 2)
                 if mdb_enabled:
                     await self.recv_until_eod_tbit(data, self.max_ibi_data_len + 1)
-                    self.log.info(f"IBI MDB: 0x{data[0]:02X}, data: [" + \
-                        " ".join([f"0x{d:02X}" for d in data[1:]]) + "]")
+                    self.log.info(
+                        f"IBI MDB: 0x{data[0]:02X}, data: ["
+                        + " ".join([f"0x{d:02X}" for d in data[1:]])
+                        + "]"
+                    )
             else:
                 self.log.warning(f"Target ({hex(addr)}) has no configured BCR, assuming BCR = 0")
         else:

@@ -75,7 +75,7 @@ def make_timer(period_ns: float, speed: float = FULL_SPEED) -> Timer:
     return Timer(scaled_timing(period_ns, speed), "ns")
 
 
-def calculate_tbit(value: int, inject_tbit_err : bool = False) -> bool:
+def calculate_tbit(value: int, inject_tbit_err: bool = False) -> bool:
     """Calculates odd-parity for `value` to be written by the controller after `value`."""
     tbit = True
     while value != 0:
