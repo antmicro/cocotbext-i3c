@@ -352,7 +352,7 @@ class I3cController:
         await self.send_stop()
         self.give_bus_control()
 
-    async def send_target_reset_pattern(self, timing) -> None:
+    async def send_target_reset_pattern(self) -> None:
         await self.take_bus_control()
         self._state = I3cState.TARGET_RESET
 
@@ -370,8 +370,6 @@ class I3cController:
         await self.send_start(pull_scl_low=False)
         await self.send_stop(pull_scl_low=False)
 
-        if timing != 0:
-            await Timer(timing, "ns")
         # TODO: Send start and I3C address header?
         self.give_bus_control()
 
@@ -524,7 +522,10 @@ class I3cController:
                 await self.send_start()
         self.give_bus_control()
 
-        await self.send_target_reset_pattern(max_timing)
+        await self.send_target_reset_pattern()
+
+        if max_timing != 0:
+            await Timer(max_timing, "ns")
 
     async def send_bit(self, b: bool) -> None:
         if not self.bus_active:
