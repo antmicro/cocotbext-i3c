@@ -562,6 +562,7 @@ class I3cController:
             self.send_start()
 
         self.scl = 0
+        self.sda = 1
         # We don't hold the data here, because it's on the target to pull it down
         # after the required amount of time
         await self.tdig_l
@@ -633,7 +634,7 @@ class I3cController:
         tgt_eod = await self.tbit_eod(request_end=stop)
         return (b, tgt_eod | stop)
 
-    async def write_addr_header(self, addr: int, read: bool = False) -> None:
+    async def write_addr_header(self, addr: int, read: bool = False) -> bool:
         if addr == I3C_RSVD_BYTE:
             self.log_info("Address Header:::Reserved I3C Address Header 0x%02x", addr)
         else:
@@ -643,6 +644,7 @@ class I3cController:
             self.log_info("Address Header:::Got NACK")
         else:
             self.log_info("Address Header:::Got ACK")
+        return not nack
 
     async def recv_until_eod_tbit(self, buf: bytearray, count: int) -> None:
         length = count if count else 1
@@ -715,7 +717,7 @@ class I3cController:
         directed_data: Optional[Iterable[tuple[int, Iterable[int]]]] = None,
         defining_byte: Optional[int] = None,
         stop: bool = True,
-    ) -> None:
+    ) -> Iterable[bool]:
         """Issue CCC Write frame. For directed CCCs use an iterable of address-data tuples"""
         await self.take_bus_control()
         is_broadcast = ccc <= 0x7F
@@ -725,6 +727,8 @@ class I3cController:
             self.log_info(f"I3C: CCC {hex(ccc)} WR (Broadcast): {log_data}")
         else:
             self.log_info(f"I3C: CCC {hex(ccc)} WR (Directed): {log_data}")
+
+        acks = []
 
         await self.send_start()
         await self.write_addr_header(I3C_RSVD_BYTE)
@@ -741,7 +745,7 @@ class I3cController:
 
             for addr, data in directed_data:
                 await self.send_start()
-                await self.write_addr_header(addr)
+                acks.append(await self.write_addr_header(addr))
                 for byte in data:
                     await self.send_byte_tbit(byte)
 
@@ -749,6 +753,7 @@ class I3cController:
             await self.send_stop()
 
         self.give_bus_control()
+        return acks
 
     async def i3c_ccc_read(
         self,
