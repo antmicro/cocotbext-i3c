@@ -646,14 +646,14 @@ class I3cController:
             self.log_info("Address Header:::Got ACK")
         return not nack
 
-    async def recv_until_eod_tbit(self, buf: bytearray, count: int) -> None:
+    async def recv_until_eod_tbit(self, buf: bytearray, count: int, stop: bool = True) -> None:
         length = count if count else 1
 
         while length:
             length = (length - 1) if count else 1
-            (byte, stop) = await self.recv_byte_t_bit(stop=not length)
+            (byte, tgt_stop) = await self.recv_byte_t_bit(stop=stop and not length)
             buf.append(byte)
-            if stop:
+            if tgt_stop:
                 return
 
     async def i3c_write(
@@ -758,30 +758,41 @@ class I3cController:
     async def i3c_ccc_read(
         self,
         ccc: int,
-        addr: int,
+        addr: [int, Iterable[int]],
         count: int,
         defining_byte: Optional[int] = None,
         stop: bool = True,
-    ) -> bytearray:
-        """Issue CCC Read frame. For directed CCCs use an iterable of address-data tuples"""
+    ) -> Iterable[tuple]:
+        """
+        Issue directed CCC Read frame. For multiple targets use address list.
+        Returns a list of tuples with (ack, data) for each target address.
+        """
+
+        if isinstance(addr, int):
+            addr = [addr]
+
         await self.take_bus_control()
-        data = bytearray()
-        self.log_info(f"I3C: CCC {hex(ccc)} RD (Directed @ {hex(addr)})")
+        astr = " ".join([hex(a) for a in addr])
+        self.log_info(f"I3C: CCC {hex(ccc)} RD (Directed @ {astr})")
+        responses = []
 
         await self.send_start()
         await self.write_addr_header(I3C_RSVD_BYTE)
         await self.send_byte_tbit(ccc)
         if defining_byte is not None:
             await self.send_byte_tbit(defining_byte)
-        await self.send_start()
-        await self.write_addr_header(addr, read=True)
-        await self.recv_until_eod_tbit(data, count)
+        for a in addr:
+            await self.send_start()
+            ack = await self.write_addr_header(a, read=True)
+            data = bytearray()
+            await self.recv_until_eod_tbit(data, count, stop=False)
+            responses.append((ack, data))
 
         if stop:
             await self.send_stop()
 
         self.give_bus_control()
-        return data
+        return responses
 
     async def _handle_ibi(self):
         """

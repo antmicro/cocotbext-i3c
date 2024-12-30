@@ -61,7 +61,8 @@ async def test_i3c(dut):
 
     await Timer(300, "ns")
 
-    mrl_data = await tb.i3c_controller.i3c_ccc_read(0x8C, 0x51, 2)
+    response = await tb.i3c_controller.i3c_ccc_read(0x8C, 0x51, 2)
+    mrl_data = response[0][1]
     assert len(mrl_data) == 2
 
     # Dump memory
