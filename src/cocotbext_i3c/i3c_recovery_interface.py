@@ -81,10 +81,16 @@ class I3cRecoveryInterface:
         await self.controller.take_bus_control()
 
         await self.controller.send_start()
-        await self.controller.write_addr_header(I3C_RSVD_BYTE)
-        await self.controller.send_start()
-        await self.controller.write_addr_header(address, read=True)
+        ack = await self.controller.write_addr_header(I3C_RSVD_BYTE)
+        if not ack:
+            return None, None
 
+        await self.controller.send_start()
+        ack = await self.controller.write_addr_header(address, read=True)
+        if not ack:
+            return None, None
+
+        # Begin reception
         try:
 
             # Read length
