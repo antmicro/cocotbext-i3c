@@ -800,7 +800,6 @@ class I3cController:
         which should be configured by the testbench. If there is no entry for the target with an address
         received on the bus, assume that the BCR has no set values hence is equal to 0.
         """
-        assert not (self.sda or self.scl)
 
         # Accept/reject the interrupt by sending an ACK/NACK
         ack = not self.nack_ibis.is_set()
