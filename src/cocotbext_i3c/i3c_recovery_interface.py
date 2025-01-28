@@ -83,11 +83,15 @@ class I3cRecoveryInterface:
         await self.controller.send_start()
         ack = await self.controller.write_addr_header(I3C_RSVD_BYTE)
         if not ack:
+            await self.controller.send_stop()
+            self.controller.give_bus_control()
             return None, None
 
         await self.controller.send_start()
         ack = await self.controller.write_addr_header(address, read=True)
         if not ack:
+            await self.controller.send_stop()
+            self.controller.give_bus_control()
             return None, None
 
         # Begin reception
@@ -131,6 +135,7 @@ class I3cRecoveryInterface:
             await Timer(1, "us")
             raise
 
+        await self.controller.send_stop()
         self.controller.give_bus_control()
 
         # Compute reference PEC checksum
