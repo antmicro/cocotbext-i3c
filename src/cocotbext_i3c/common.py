@@ -36,8 +36,8 @@ class I3cTimings:
     # * Table 87 'I3C Push-Pull Timing Parameters for SDR, ML, HDR-DDR, and HDR-BT Modes'
     # of I3C Basic Specification v1.1.1
     thd: float  # SDA Hold time
-    tdig_h: float = 32.0  # SCL Clock High Period (for Pure Bus)
-    tdig_l: float = 32.0  # SCL Clock Low Period
+    tdig_h: float = 40.0  # SCL Clock High Period (for Pure Bus)
+    tdig_l: float = 40.0  # SCL Clock Low Period
     tcas: float = 38.4  # Clock After START (S) Condition
     tcbp: float = 19.2  # Clock Before STOP (P) Condition
     tcbsr: float = 19.2  # Clock Before Repeated START (Sr) Condition
