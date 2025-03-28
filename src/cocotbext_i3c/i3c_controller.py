@@ -106,6 +106,7 @@ class I3cController:
 
         if timings is None:
             timings = I3cControllerTimings()
+        self.timings = timings
 
         def at_least_tsupp(period_ns: float) -> float:
             return period_ns if period_ns > timings.tsupp else timings.tsupp
