@@ -14,6 +14,8 @@ from cocotb.triggers import Event, FallingEdge, First, NextTimeStep, RisingEdge,
 from .common import (
     I3C_RSVD_BYTE,
     I3cControllerTimings,
+    I3cPRResp,
+    I3cPWResp,
     I3cState,
     I3cTargetResetAction,
     calculate_tbit,
@@ -663,31 +665,32 @@ class I3cController:
         stop: bool = True,
         mode: I3cXferMode = I3cXferMode.PRIVATE,
         inject_tbit_err: bool = False,
-    ) -> None:
+    ) -> I3cPWResp:
         """I3C Private Write transfer"""
         await self.take_bus_control()
         self.log_info(f"I3C: Write data ({mode.name}) {data} @ {hex(addr)}")
         await self.send_start()
         await self.write_addr_header(I3C_RSVD_BYTE)
         await self.send_start()
-        await self.write_addr_header(addr)
-
-        for i, d in enumerate(data):
-            match mode:
-                case I3cXferMode.PRIVATE:
-                    await self.send_byte_tbit(d, inject_tbit_err)
-                case I3cXferMode.LEGACY_I2C:
-                    await self.send_byte(d)
-            self.log_info(f"I3C: wrote byte {hex(d)}, idx={i}")
+        ack = await self.write_addr_header(addr)
+        if ack:
+            for i, d in enumerate(data):
+                match mode:
+                    case I3cXferMode.PRIVATE:
+                        await self.send_byte_tbit(d, inject_tbit_err)
+                    case I3cXferMode.LEGACY_I2C:
+                        await self.send_byte(d)
+                self.log_info(f"I3C: wrote byte {hex(d)}, idx={i}")
 
         if stop:
             await self.send_stop()
 
         self.give_bus_control()
+        return I3cPWResp(not ack)
 
     async def i3c_read(
         self, addr: int, count: int, stop: bool = True, mode: I3cXferMode = I3cXferMode.PRIVATE
-    ) -> bytearray:
+    ) -> I3cPRResp:
         """I3C Private Read transfer"""
         await self.take_bus_control()
         data = bytearray()
@@ -696,19 +699,20 @@ class I3cController:
         await self.send_start()
         await self.write_addr_header(I3C_RSVD_BYTE)
         await self.send_start()
-        await self.write_addr_header(addr, read=True)
-        match mode:
-            case I3cXferMode.PRIVATE:
-                await self.recv_until_eod_tbit(data, count)
-            case I3cXferMode.LEGACY_I2C:
-                for i in range(count):
-                    send_ack = not (i == count - 1)
-                    data.append(await self.recv_byte(send_ack))
+        ack = await self.write_addr_header(addr, read=True)
+        if ack:
+            match mode:
+                case I3cXferMode.PRIVATE:
+                    await self.recv_until_eod_tbit(data, count)
+                case I3cXferMode.LEGACY_I2C:
+                    for i in range(count):
+                        send_ack = not (i == count - 1)
+                        data.append(await self.recv_byte(send_ack))
         if stop:
             await self.send_stop()
 
         self.give_bus_control()
-        return data
+        return I3cPRResp(not ack, data)
 
     async def i3c_ccc_write(
         self,

@@ -24,14 +24,15 @@ async def test_simple_read(dut, write_data):
 
     length = len(write_data)
     tb.i3c_target._mem._write_mem(0, write_data, length)
-    recv_data = await tb.i3c_controller.i3c_read(tb.i3c_target.address, length)
+    resp = await tb.i3c_controller.i3c_read(tb.i3c_target.address, length)
+    assert not resp.nack
 
     # Dump memory for more insight
-    if recv_data != bytearray(write_data):
+    if resp.data != bytearray(write_data):
         tb.log.info("Dump target memory")
         tb.i3c_target._mem.dump()
         raise I3cExecError(
-            f"Written {[hex(_) for _ in write_data]} to the target device but read {recv_data}"
+            f"Written {[hex(_) for _ in write_data]} to the target device but read {resp.data}"
         )
 
 

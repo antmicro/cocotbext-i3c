@@ -180,3 +180,14 @@ class I3cTargetResetAction(IntEnum):
     RESET_WHOLE_TARGET = 0x02
     DEBUG_NETWORK_ADAPTER_RESET = 0x03
     VIRTUAL_TARGET_DETECT = 0x04
+
+
+@dataclass
+class I3cPRResp:
+    nack: bool
+    data: bytearray
+
+
+@dataclass
+class I3cPWResp:
+    nack: bool

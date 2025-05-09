@@ -32,20 +32,22 @@ async def test_i3c(dut):
 
     # Private read
     # Should read two byte as the target keeps SDA high
-    data = await tb.i3c_controller.i3c_read(0x50, 2)
-    assert data == bytearray([0xAA, 0xBB])
+    resp = await tb.i3c_controller.i3c_read(0x50, 2)
+    assert not resp.nack
+    assert resp.data == bytearray([0xAA, 0xBB])
 
     await tb.i3c_controller.i3c_write(0x50, [0xCC])
 
     # Should read one byte as the target terminates the read after one byte
     # (the target will reject the read as it has no new data to send)
-    data = await tb.i3c_controller.i3c_read(0x50, 2)
-    assert data == bytearray([0xCC])
+    resp = await tb.i3c_controller.i3c_read(0x50, 2)
+    assert not resp.nack
+    assert resp.data == bytearray([0xCC])
 
     await Timer(300, "ns")
 
     # Legacy I2C Read
-    data = await tb.i3c_controller.i3c_read(0x40, 2, mode=I3cXferMode.LEGACY_I2C)
+    resp = await tb.i3c_controller.i3c_read(0x40, 2, mode=I3cXferMode.LEGACY_I2C)
 
     await Timer(300, "ns")
 
@@ -79,11 +81,12 @@ async def test_simple_write_followed_by_read(dut, address, issued_data):
     await Timer(100, "ns")
 
     await tb.i3c_controller.i3c_write(address, issued_data)
-    recv_data = await tb.i3c_controller.i3c_read(address, 1)
+    resp = await tb.i3c_controller.i3c_read(address, 1)
+    assert not resp.nack
 
-    assert recv_data == bytearray(
+    assert resp.data == bytearray(
         issued_data
-    ), f"Written {[hex(_) for _ in issued_data]} to the target device but read {recv_data}"
+    ), f"Written {[hex(_) for _ in issued_data]} to the target device but read {resp.data}"
 
 
 @cocotb.test()
@@ -111,14 +114,15 @@ async def test_read_write_seq(dut, target_address, test_seq):
 
     for addr, data in test_seq:
         await tb.i3c_controller.i3c_write(addr, data, stop=False)
-        recv_data = await tb.i3c_controller.i3c_read(addr, len(data), stop=False)
+        resp = await tb.i3c_controller.i3c_read(addr, len(data), stop=False)
+        assert not resp.nack
         # Dump memory
         tb.log.info("Dump target memory")
         tb.i3c_target._mem.dump()
         if addr == target_address:
-            assert recv_data == bytearray(
+            assert resp.data == bytearray(
                 data
-            ), f"Written {[hex(_) for _ in data]} to the target device but read {recv_data}"
+            ), f"Written {[hex(_) for _ in data]} to the target device but read {resp.data}"
 
     await tb.i3c_controller.send_stop()
 
