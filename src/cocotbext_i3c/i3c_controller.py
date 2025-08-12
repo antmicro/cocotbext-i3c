@@ -690,15 +690,21 @@ class I3cController:
         return I3cPWResp(not ack)
 
     async def i3c_read(
-        self, addr: int, count: int, stop: bool = True, mode: I3cXferMode = I3cXferMode.PRIVATE
+        self,
+        addr: int,
+        count: int,
+        stop: bool = True,
+        mode: I3cXferMode = I3cXferMode.PRIVATE,
+        send_rsvd: bool = True,
     ) -> I3cPRResp:
         """I3C Private Read transfer"""
         await self.take_bus_control()
         data = bytearray()
         self.log_info(f"I3C: Read data ({mode.name}) @ {hex(addr)}")
 
-        await self.send_start()
-        await self.write_addr_header(I3C_RSVD_BYTE)
+        if send_rsvd:
+            await self.send_start()
+            await self.write_addr_header(I3C_RSVD_BYTE)
         await self.send_start()
         ack = await self.write_addr_header(addr, read=True)
         if ack:
