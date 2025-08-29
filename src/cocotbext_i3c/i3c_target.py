@@ -272,7 +272,7 @@ class I3CTarget:
             except SimTimeoutError:
                 self.log.debug("Waiting for SDA/SCL falling edge")
 
-        if result != sda_falling_edge:
+        if result != sda_falling_edge or self.scl_i.value == 0:
             return None
         try:
             await check_in_time(FallingEdge(self.scl_i), tCAS)
