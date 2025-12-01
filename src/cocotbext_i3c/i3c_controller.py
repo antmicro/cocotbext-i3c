@@ -1,5 +1,5 @@
 """
-Copyright (c) 2024 Antmicro <www.antmicro.com>
+Copyright (c) 2024-2025 Antmicro <www.antmicro.com>
 SPDX-License-Identifier: Apache-2.0
 """
 
@@ -21,8 +21,10 @@ from .common import (
     calculate_tbit,
     make_timer,
     report_config,
+    scaled_timing,
     with_timeout_event,
 )
+from .hdr_ddr import calculate_hdr_crc5, calculate_parity
 
 _T = TypeVar("_T")
 
@@ -354,6 +356,165 @@ class I3cController:
         self.sda = 0
         await self.send_stop()
         self.give_bus_control()
+
+    async def send_hdr_preamble(self) -> None:
+        """Send HDR preamble pattern (alternating 0/1 on SDA while toggling SCL)."""
+        self.log_info("I3C: HDR Preamble")
+        # Preamble: 2 bits alternating pattern
+        for bit in [0, 1]:
+            self.scl = 0
+            await self.tdig_l
+            self.sda = bit
+            self.scl = 1
+            await self.tdig_h
+
+    async def send_hdr_ddr_bit(self, bit: int) -> None:
+        """
+        Send a single bit in HDR-DDR mode (data changes on both SCL edges).
+
+        Args:
+            bit: Bit value (0 or 1)
+        """
+        # In DDR mode, data is valid on both rising and falling edges
+        self.sda = bit
+        await Timer(scaled_timing(self.timings.tdig_h / 2, self.speed), "ns")
+
+    async def send_hdr_ddr_word(self, word: int, num_bits: int) -> None:
+        """
+        Send a word in HDR-DDR mode, MSB first.
+
+        Args:
+            word: Data word to send
+            num_bits: Number of bits to send
+        """
+        for i in range(num_bits - 1, -1, -1):
+            bit = (word >> i) & 1
+            # Send on falling edge
+            self.scl = 0
+            self.sda = bit
+            await self.tdig_l
+            # Send on rising edge
+            self.scl = 1
+            await self.tdig_h
+
+    async def send_hdr_ddr_write(self, addr: int, data: Iterable[int]) -> None:
+        """
+        Send HDR-DDR write transaction.
+
+        Args:
+            addr: 7-bit target address
+            data: Data bytes to write
+        """
+        await self.take_bus_control()
+        self.log_info(f"I3C: HDR-DDR Write to {hex(addr)}, data: {list(data)}")
+
+        # Send preamble
+        await self.send_hdr_preamble()
+
+        # Build command word (16 bits for HDR-DDR)
+        # Bits [15:9]: Address (7 bits)
+        # Bit [8]: R/W# (0 = Write)
+        # Bits [7:3]: Command code (0x00 for standard write)
+        # Bits [2:0]: Reserved
+        cmd_word = (addr << 9) | (0 << 8) | (0x00 << 3) | 0x00
+
+        # Send command word
+        await self.send_hdr_ddr_word(cmd_word, 16)
+
+        # Send data bytes with parity
+        data_bytes = bytearray(data)
+        for byte in data_bytes:
+            await self.send_hdr_ddr_word(byte, 8)
+            # Send parity bit
+            parity = calculate_parity(byte)
+            await self.send_hdr_ddr_bit(parity)
+
+        # Calculate and send CRC-5
+        crc_data = cmd_word.to_bytes(2, "big") + data_bytes
+        crc = calculate_hdr_crc5(crc_data)
+        await self.send_hdr_ddr_word(crc, 5)
+
+        self.give_bus_control()
+        self.log_info("I3C: HDR-DDR Write complete")
+
+    async def send_hdr_ddr_read(self, addr: int, count: int) -> bytearray:
+        """
+        Send HDR-DDR read transaction.
+
+        Args:
+            addr: 7-bit target address
+            count: Number of bytes to read
+
+        Returns:
+            Read data bytes
+        """
+        await self.take_bus_control()
+        self.log_info(f"I3C: HDR-DDR Read from {hex(addr)}, count: {count}")
+
+        await self.send_hdr_preamble()
+
+        # Build command word (16 bits for HDR-DDR)
+        # Bits [15:9]: Address (7 bits)
+        # Bit [8]: R/W# (1 = Read)
+        # Bits [7:3]: Command code (0x00 for standard read)
+        # Bits [2:0]: Reserved
+        cmd_word = (addr << 9) | (1 << 8) | (0x00 << 3) | 0x00
+
+        # Send command word
+        await self.send_hdr_ddr_word(cmd_word, 16)
+
+        # Read data bytes from target
+        data = bytearray()
+
+        for _ in range(count):
+            # Read data byte (on both SCL edges in DDR mode)
+            byte_val = 0
+            for bit_idx in range(8):
+                # Read on falling edge
+                self.scl = 0
+                await self.tdig_l
+                if self.sda_i is not None:
+                    byte_val = (byte_val << 1) | int(self.sda)
+
+                # Read on rising edge
+                self.scl = 1
+                await self.tdig_h
+
+            data.append(byte_val)
+
+            # Read and verify parity bit
+            self.scl = 0
+            await self.tdig_l
+            if self.sda_i is not None:
+                parity_bit = int(self.sda)
+                expected_parity = calculate_parity(byte_val)
+                if parity_bit != expected_parity:
+                    self.log.warning(f"HDR-DDR Read: Parity error on byte {hex(byte_val)}")
+            self.scl = 1
+            await self.tdig_h
+
+        # Read CRC-5
+        crc_received = 0
+        for _ in range(5):
+            self.scl = 0
+            await self.tdig_l
+            if self.sda_i is not None:
+                crc_received = (crc_received << 1) | int(self.sda)
+            self.scl = 1
+            await self.tdig_h
+
+        # Verify CRC
+        crc_data = cmd_word.to_bytes(2, "big") + data
+        crc_expected = calculate_hdr_crc5(crc_data)
+        if crc_received != crc_expected:
+            self.log.warning(
+                f"HDR-DDR Read: CRC error - received {hex(crc_received)}, expected {hex(crc_expected)}"
+            )
+
+        self.log_info(f"I3C: HDR-DDR Read complete - received {len(data)} bytes")
+
+        self.give_bus_control()
+        return data
 
     async def send_target_reset_pattern(self) -> None:
         await self.take_bus_control()

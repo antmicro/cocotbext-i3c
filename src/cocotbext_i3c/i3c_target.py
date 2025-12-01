@@ -197,6 +197,13 @@ class I3CTarget:
         self.hdr_exit_detected = False
         cocotb.start_soon(self._detect_hdr_exit())
 
+        # HDR mode state tracking
+        self.hdr_mode = False
+        self.last_ccc = None  # Track last received CCC
+
+    def set_hdr_mode(self, enable: bool):
+        self.hdr_mode = enable
+
     @property
     def bus_active(self) -> bool:
         return self.state is not I3cState.FREE
@@ -369,6 +376,42 @@ class I3CTarget:
         await FallingEdge(self.scl_i)
         self.sda = 1
 
+    async def check_hdr_preamble(self):
+        """
+        Detect HDR preamble pattern (alternating 0/1 on SDA while SCL toggles).
+        Returns True if valid preamble detected, False otherwise.
+        """
+        if not self.hdr_mode:
+            return False
+
+        self.log.debug("Checking for HDR preamble")
+
+        # Look for alternating pattern: 0, 1 on SDA with SCL toggles
+        try:
+            # Wait for SCL low
+            if self.scl:
+                await FallingEdge(self.scl_i)
+
+            # Check for bit 0
+            await RisingEdge(self.scl_i)
+            if self.sda != 0:
+                return False
+
+            # Wait for next SCL cycle
+            await FallingEdge(self.scl_i)
+            await RisingEdge(self.scl_i)
+
+            # Check for bit 1
+            if self.sda != 1:
+                return False
+
+            self.log.info("HDR preamble detected!")
+            return True
+
+        except Exception as e:
+            self.log.debug(f"HDR preamble check failed: {e}")
+            return False
+
     async def recv(self, bits_num=8) -> int:
         b = 0
         for _ in range(bits_num):
@@ -522,7 +565,8 @@ class I3CTarget:
                 continue
 
             self.hdr_exit_detected = True
-            self.log.info("Detected HDR Exit Pattern!")
+            self.hdr_mode = False
+            self.log.info("Detected HDR Exit Pattern - returning to SDR mode!")
 
     async def send_ibi(self, mdb=None, data: bytearray = None):
         # Disable bus monitor and wait for bus to enter idle state
@@ -570,21 +614,35 @@ class I3CTarget:
             # From this moment monitor is busy and should not be interrupted
             self.monitor_idle.clear()
 
-            # Wait for action on the bus
-            next_state = await self.check_start(repeated=False)
-            if next_state:
-                self.state = next_state
+            # In HDR mode, check for HDR preamble instead of START
+            if self.hdr_mode:
+                if await self.check_hdr_preamble():
+                    self.log.info("HDR transaction detected, monitoring HDR traffic")
+                    # For now, just wait for HDR exit
+                    # Full HDR transaction handling would go here
+                    await NextTimeStep()
+                else:
+                    await with_timeout_event(
+                        self.monitor_enable,
+                        First(Edge(self.sda_i), Edge(self.scl_i)),
+                        1,
+                    )
             else:
-                await with_timeout_event(
-                    self.monitor_enable,
-                    First(Edge(self.sda_i), Edge(self.scl_i)),
-                    1,
-                )
+                # SDR mode: Wait for START condition
+                next_state = await self.check_start(repeated=False)
+                if next_state:
+                    self.state = next_state
+                else:
+                    await with_timeout_event(
+                        self.monitor_enable,
+                        First(Edge(self.sda_i), Edge(self.scl_i)),
+                        1,
+                    )
 
-            while self.bus_active:
-                self.state = await self.handle_message()
+                while self.bus_active:
+                    self.state = await self.handle_message()
 
-                if self.state == I3cState.STOP:
-                    self.log.debug("TARGET:::Got STOP.")
-                    self.state = I3cState.FREE
-                    self.header = I3cHeader.NONE
+                    if self.state == I3cState.STOP:
+                        self.log.debug("TARGET:::Got STOP.")
+                        self.state = I3cState.FREE
+                        self.header = I3cHeader.NONE
