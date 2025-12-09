@@ -9,7 +9,16 @@ from typing import Any, Callable, Iterable, Optional, TypeVar, Union
 
 import cocotb
 from cocotb.handle import ModifiableObject
-from cocotb.triggers import Event, FallingEdge, First, NextTimeStep, RisingEdge, Timer
+from cocotb.triggers import (
+    Edge,
+    Event,
+    FallingEdge,
+    First,
+    NextTimeStep,
+    ReadOnly,
+    RisingEdge,
+    Timer,
+)
 
 from .common import (
     I3C_RSVD_BYTE,
@@ -21,9 +30,10 @@ from .common import (
     calculate_tbit,
     make_timer,
     report_config,
-    scaled_timing,
     with_timeout_event,
 )
+
+# from .hdr_bt import calculate_hdr_crc16, calculate_hdr_crc32
 from .hdr_ddr import calculate_hdr_crc5, calculate_parity
 
 _T = TypeVar("_T")
@@ -362,6 +372,24 @@ class I3cController:
         await self.send_stop()
         self.give_bus_control()
 
+    async def send_hdr_rstart(self) -> None:
+        self.log_info("I3C: HDR RStart")
+        await self.take_bus_control()
+        self._state = I3cState.FREE
+        self.scl = 0
+        self.sda = 1
+        for _ in range(2):
+            await self.tdig_h
+            self.sda = 0
+            await self.tdig_l
+            self.sda = 1
+        await self._hold_data()
+        await self.remaining_tlow
+        self.scl = 1
+        await self.tdig_h
+        self.scl = 0
+        await self._hold_data()
+
     async def send_hdr_preamble(self, preamble_code=[0, 1]) -> int:
         """Send HDR preamble pattern (alternating 0/1 on SDA while toggling SCL)."""
         self.log_info("I3C: HDR Preamble")
@@ -375,6 +403,7 @@ class I3cController:
             else:
                 await self.remaining_tlow
             self.scl = 0 if scl else 1
+            await ReadOnly()
             return_value = return_value << 1 | self.sda
             await self._hold_data()
         # Release SDA
@@ -402,10 +431,9 @@ class I3cController:
 
     async def recv_hdr_ddr_word(self, num_bits: int) -> int:
         """
-        Recv a word in HDR-DDR mode, MSB first.
+        Receive a word in HDR-DDR mode, MSB first.
 
         Args:
-            word: Data word to send
             num_bits: Number of bits to receive
         """
         word = 0
@@ -416,8 +444,8 @@ class I3cController:
                 await self.remaining_thigh
             else:
                 await self.remaining_tlow
-            self.scl = 0 if scl else 1
             word |= self.sda & 1
+            self.scl = 0 if scl else 1
             await self._hold_data()
         return word
 
@@ -532,23 +560,23 @@ class I3cController:
         await self.send_hdr_ddr_word(cmd_word, 16)
         await self.send_hdr_parity(cmd_word)
 
+        data = []
         preamble = await self.send_hdr_preamble([1, 1])
         if preamble == 0x2:
             # Read data bytes from target
-            data = bytearray()
             for i in range(count):
                 word = await self.recv_hdr_ddr_word(16)
                 parity = self.calc_hdr_parity(word)
                 parity_recv = await self.recv_hdr_ddr_word(2)
                 if parity != parity_recv:
-                    self.log.warning(f"HDR-DDR Read: Parity error on byte {hex(byte_val)}")
+                    self.log.warning(f"HDR-DDR Read: Parity error on byte {hex(word)}")
                 else:
                     data.append(word)
                 if i + 1 < count and i != interrupt:
-                    preamle = await self.send_hdr_preamble([1, 1])
+                    preamble = await self.send_hdr_preamble([1, 1])
                 if i + 1 < count:
                     # Interrupt read operation
-                    preamle = await self.send_hdr_preamble([1, 0])
+                    preamble = await self.send_hdr_preamble([1, 0])
                     premature_termination = True
                     break
 
@@ -568,42 +596,6 @@ class I3cController:
         self.give_bus_control()
         return data
 
-    async def send_hdr_bt_bit(self, bit: int) -> None:
-        """
-        Send a single bit in HDR-BT mode (DDR - data on both edges).
-        Similar to HDR-DDR but optimized for bulk transfers.
-
-        Args:
-            bit: Bit value (0 or 1)
-        """
-        # Send on falling edge
-        self.scl = 0
-        self.sda = bit
-        await self.tdig_l
-        # Send on rising edge
-        self.scl = 1
-        await self.tdig_h
-
-    async def send_hdr_bt_preamble(self) -> None:
-        """
-        Send HDR-BT preamble pattern.
-        Similar to HDR-DDR: alternating 0/1 pattern.
-        """
-        self.log_info("I3C: Sending HDR-BT preamble")
-        # HDR-BT preamble: alternating bits like HDR-DDR
-        for _ in range(4):
-            self.scl = 0
-            self.sda = 0
-            await self.tdig_l
-            self.scl = 1
-            await self.tdig_h
-
-            self.scl = 0
-            self.sda = 1
-            await self.tdig_l
-            self.scl = 1
-            await self.tdig_h
-
     async def send_hdr_bt_word(self, word: int, num_bits: int) -> None:
         """
         Send a word in HDR-BT mode (DDR), MSB first.
@@ -612,9 +604,178 @@ class I3cController:
             word: Data word to send
             num_bits: Number of bits to send
         """
-        for i in range(num_bits - 1, -1, -1):
+        for i in range(num_bits):
             bit = (word >> i) & 1
-            await self.send_hdr_bt_bit(bit)
+            scl = self.scl
+            self.sda = bit
+            if scl:
+                await self.remaining_thigh
+            else:
+                await self.remaining_tlow
+            self.scl = 0 if scl else 1
+            await self._hold_data()
+
+    async def recv_hdr_bt_word(self, num_bits: int, target_clk: bool = False) -> int:
+        """
+        Receive a word in HDR-BT mode (DDR), MSB first.
+
+        Args:
+            num_bits: Number of bits to receive
+        """
+        return_value = 0
+        if not target_clk:
+            for i in range(num_bits):
+                scl = self.scl
+                if scl:
+                    await self.remaining_thigh
+                else:
+                    await self.remaining_tlow
+                return_value = return_value | (self.sda << i)
+                self.scl = 0 if scl else 1
+                await self._hold_data()
+        else:
+            for i in range(num_bits):
+                await Edge(self.scl_i)
+                return_value = return_value | (self.sda << i)
+                await self._hold_data()
+        return return_value
+
+    def calc_bt_parity(self, data: Iterable[int]) -> int:
+        """
+        Calculates HDR parity value based on data
+
+        Args:
+            data: Source data to calculate parity
+        """
+        base = 0
+        for dat in data:
+            base ^= dat
+        base = (base ^ (base >> 4)) & 0xF
+        base = (base ^ (base >> 2)) & 0x3
+        base = data ^ 1
+        return data
+
+    async def send_hdr_bt_header(
+        self,
+        addr: int,
+        cmd: Iterable[int],
+        read: bool = False,
+        use_CRC32: bool = False,
+        target_SCL: bool = False,
+        CCC_continuation: bool = False,
+    ) -> None:
+        # Build command word (48 bits for HDR-BT)
+        # Bit  [0]: R/W#
+        # Bits [7:1]: Address (7 bits)
+        # Bits [15:8]: cmd0
+        # Bits [23:16]: cmd1
+        # Bits [31:24]: cmd2
+        # Bits [39:32]: cmd3
+        # Bit  [40]: R/W#
+        # Bit  [41]: CRC32/CRC16#
+        # Bit  [42]: Controller SCL/Target SCL# (for read only)
+        # Bit  [43]: Normal Message/CCC continuation#
+        # Bits [45:44]: Reserved 0
+        # Bits [47:46]: Parity
+        read = 1 if read else 0
+        crc = 1 if use_CRC32 else 0
+        scl_mode = 1 if read and target_SCL else 0
+        ccc = 1 if CCC_continuation else 0
+        cmd_word = (
+            read
+            | (addr & 0x7F) << 1
+            | cmd[0] << 8
+            | cmd[1] << 16
+            | cmd[2] << 24
+            | cmd[3] << 32
+            | read << 40
+            | crc << 41
+            | scl_mode << 42
+            | ccc << 43
+            | 0x0 << 44
+        )
+        parity = self.calc_bt_parity(cmd_word) & 0x3
+        cmd_word |= parity << 46
+        await self.send_hdr_bt_word(cmd_word, 48)
+
+    async def send_hdr_bt_header_transition(self, allow_delay_blocks: bool = False) -> int:
+        # Build transition byte (8 bits for HDR-BT)
+        allow_delay_blocks = 0 if allow_delay_blocks else 1
+        word = 0x3 | allow_delay_blocks << 2 | 0x00 << 3
+        return_value = 0
+        for i in range(8):
+            bit = (word >> i) & 1
+            scl = self.scl
+            self.sda = bit
+            if scl:
+                await self.remaining_thigh
+            else:
+                await self.remaining_tlow
+            self.scl = 0 if scl else 1
+            await ReadOnly()
+            if i < 2:
+                return_value = return_value | (self.sda << i)
+            await self._hold_data()
+        return return_value
+
+    async def send_hdr_bt_transition_control(
+        self, last_block: bool = False, data_words: int = 1
+    ) -> int:
+        # Build transition byte (8 bits for HDR-BT)
+        last_block = 1 if last_block else 0
+        if not last_block:
+            data_words = 0
+        else:
+            data_words -= 1
+        data = last_block << 2 | (data_words & 0xF) << 4
+        parity = data ^ (data >> 4)
+        parity = parity ^ (parity >> 2)
+        parity = (parity ^ (parity >> 1) ^ 1) & 1
+        data |= parity << 3
+        data |= 0x3
+
+        return_value = 0
+        for i in range(8):
+            bit = (data >> i) & 1
+            scl = self.scl
+            self.sda = bit
+            if scl:
+                await self.remaining_thigh
+            else:
+                await self.remaining_tlow
+            self.scl = 0 if scl else 1
+            await ReadOnly()
+            if i < 2:
+                return_value = return_value | (self.sda << i)
+            await self._hold_data()
+        return return_value
+
+    async def recv_hdr_bt_transition_control(
+        self, target_clk: bool = False, discard_transfer: bool = False
+    ) -> int:
+        # Build transition byte (8 bits for HDR-BT)
+        word = 0xFF if not discard_transfer else 0xFD
+        return_value = 0
+        if not target_clk:
+            for i in range(8):
+                bit = (word >> i) & 1
+                scl = self.scl
+                self.sda = bit
+                if scl:
+                    await self.remaining_thigh
+                else:
+                    await self.remaining_tlow
+                return_value = return_value | (self.sda << i)
+                self.scl = 0 if scl else 1
+                await self._hold_data()
+        else:
+            for i in range(8):
+                bit = (word >> i) & 1
+                self.sda = bit
+                await Edge(self.scl_i)
+                return_value = return_value | (self.sda << i)
+                await self._hold_data()
+        return return_value
 
     async def send_hdr_bt_write(self, addr: int, data: Iterable[int]) -> None:
         """
