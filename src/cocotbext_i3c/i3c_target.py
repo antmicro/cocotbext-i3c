@@ -397,9 +397,8 @@ class I3CTarget:
             if self.sda != 0:
                 return False
 
-            # Wait for next SCL cycle
+            # Wait for next SCL edge
             await FallingEdge(self.scl_i)
-            await RisingEdge(self.scl_i)
 
             # Check for bit 1
             if self.sda != 1:

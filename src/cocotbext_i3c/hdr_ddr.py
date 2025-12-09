@@ -24,17 +24,10 @@ def calculate_hdr_crc5(data: bytes) -> int:
         for i in range(7, -1, -1):
             bit = (byte >> i) & 1
             msb = (crc >> 4) & 1
-            crc = ((crc << 1) | bit) & 0x1F
-            if msb:
+            crc = (crc << 1) & 0x1F
+            if msb != bit:
                 crc ^= poly
-
-    for _ in range(5):
-        msb = (crc >> 4) & 1
-        crc = (crc << 1) & 0x1F
-        if msb:
-            crc ^= poly
-
-    return crc ^ 0x1F
+    return crc
 
 
 def calculate_parity(byte: int) -> int:
