@@ -23,14 +23,16 @@ async def test_hdr_exit(dut):
 
     await Timer(100, "ns")
 
-    assert not tb.i3c_target.hdr_exit_detected, "ERROR: Unexpected HDR Exit Pattern detected"
-    await tb.i3c_controller.send_hdr_exit()
-    assert tb.i3c_target.hdr_exit_detected, "ERROR: HDR Exit Pattern not detected"
-
-    tb.i3c_target.clear_hdr_exit_flag()
     assert (
-        not tb.i3c_target.hdr_exit_detected
+        not tb.i3c_target.hdr_exit_detected.is_set()
+    ), "ERROR: Unexpected HDR Exit Pattern detected"
+    await tb.i3c_controller.send_hdr_exit()
+    assert tb.i3c_target.hdr_exit_detected.is_set(), "ERROR: HDR Exit Pattern not detected"
+
+    tb.i3c_target.hdr_exit_detected.clear()
+    assert (
+        not tb.i3c_target.hdr_exit_detected.is_set()
     ), "ERROR: HDR Exit Pattern detected after HDR Exit flag was cleared"
 
     await tb.i3c_controller.send_hdr_exit()
-    assert tb.i3c_target.hdr_exit_detected, "ERROR: HDR Exit Pattern not detected"
+    assert tb.i3c_target.hdr_exit_detected.is_set(), "ERROR: HDR Exit Pattern not detected"

@@ -388,20 +388,27 @@ class I3cController:
         self.scl = 0
         await self._hold_data()
 
-    async def send_hdr_preamble(self, preamble_code=[0, 1]) -> int:
+    async def send_hdr_preamble(
+        self, preamble_code: Iterable[int] = [0, 1], stop_on_mismath: bool = False
+    ) -> int:
         """Send HDR preamble pattern (alternating 0/1 on SDA while toggling SCL)."""
         self.log_info("I3C: HDR Preamble")
+        drive = True
         return_value = 0
         # Preamble: 2 bits alternating pattern
         for bit in preamble_code:
             scl = self.scl
-            self.sda = bit
+            if drive:
+                self.sda = bit
             if scl:
                 await self.remaining_thigh
             else:
                 await self.remaining_tlow
             return_value = return_value << 1 | self.sda
             self.scl = 0 if scl else 1
+            if self.sda != bit & 1 and stop_on_mismath:
+                drive = False
+                self.sda = 1
             await self._hold_data()
         # Release SDA
         self.sda = 1
@@ -496,7 +503,7 @@ class I3cController:
         # Bits [14:8]: Command code (0x00 for standard write)
         # Bits [7:1]: Address (7 bits)
         # Bits [0]: Reserved/parity-bit
-        cmd_word = (0 << 16) | (addr << 1) | 0x00
+        cmd_word = (0 << 8) | (addr << 1) | 0x00
         parity = self.calc_hdr_parity(cmd_word) & 1
         cmd_word |= (parity ^ 1) & 1
 
@@ -506,6 +513,7 @@ class I3cController:
 
         preamble = await self.send_hdr_preamble([1, 1])
         if preamble == 0x3:
+            self.log_info("I3C: HDR-DDR Write NACKed")
             nack = True
         elif preamble == 0x2:
             # Send data bytes with parity
@@ -523,11 +531,14 @@ class I3cController:
 
             if not premature_termination or send_CRC_on_termination:
                 # Calculate and send CRC-5
-                crc_data = cmd_word.to_bytes(2, "big") + [dat.to_bytes(2, "big") for dat in data]
+                crc_data = cmd_word.to_bytes(2, "big")
+                for dat in data:
+                    crc_data += dat.to_bytes(2, "big")
                 crc = calculate_hdr_crc5(crc_data)
                 crc = (crc << 1) | 1
                 if not premature_termination:
                     _ = await self.send_hdr_preamble()
+                await self.send_hdr_ddr_word(0xC, 4)
                 await self.send_hdr_ddr_word(crc, 6)
         else:
             self.log_error(f"Unknown preamble value: {bin(preamble)}")
@@ -540,7 +551,7 @@ class I3cController:
         return I3cPWResp(nack, sent_words)
 
     async def send_hdr_ddr_read(
-        self, addr: int, count: int, recv_CRC_on_termination: bool = False, interrupt: int = -1
+        self, addr: int, recv_CRC_on_termination: bool = False, interrupt: int = -1
     ) -> I3cPRResp:
         """
         Send HDR-DDR read transaction.
@@ -555,7 +566,7 @@ class I3cController:
             I3cPRResp
         """
         await self.take_bus_control()
-        self.log_info(f"I3C: HDR-DDR Read from {hex(addr)}, count: {count}")
+        self.log_info(f"I3C: HDR-DDR Read from {hex(addr)}")
 
         nack = False
         premature_termination = False
@@ -567,7 +578,7 @@ class I3cController:
         # Bits [14:8]: Command code (0x00 for standard write)
         # Bits [7:1]: Address (7 bits)
         # Bits [0]: Reserved/parity-bit
-        cmd_word = (0x80 << 16) | (addr << 1) | 0x00
+        cmd_word = (0x80 << 8) | (addr << 1) | 0x00
 
         parity = self.calc_hdr_parity(cmd_word) & 1
         cmd_word |= (parity ^ 1) & 1
@@ -578,33 +589,44 @@ class I3cController:
         data = []
         preamble = await self.send_hdr_preamble([1, 1])
         if preamble == 0x3:
+            self.log_info("I3C: HDR-DDR Read NACKed")
             nack = True
         elif preamble == 0x2:
             # Read data bytes from target
-            for i in range(count):
+            while True:
                 word = await self.recv_hdr_ddr_word(16)
+                data.append(word)
                 parity = self.calc_hdr_parity(word)
                 parity_recv = await self.recv_hdr_ddr_word(2)
                 if parity != parity_recv:
-                    self.log.warning(f"HDR-DDR Read: Parity error on byte {hex(word)}")
-                else:
-                    data.append(word)
-                if i + 1 < count and i != interrupt:
-                    preamble = await self.send_hdr_preamble([1, 1])
-                if i + 1 < count:
+                    self.log.error(f"HDR-DDR Read: Parity error on byte {hex(word)}")
+                response = [1, 1]
+                if interrupt == 0:
                     # Interrupt read operation
-                    preamble = await self.send_hdr_preamble([1, 0])
+                    response = [1, 0]
+                preamble = await self.send_hdr_preamble(response, stop_on_mismath=True)
+                if preamble == 0x2:
                     premature_termination = True
+                    break
+                elif preamble == 0x1:
                     break
 
             if not premature_termination or recv_CRC_on_termination:
+                crc_token = await self.recv_hdr_ddr_word(4)
+                if crc_token != 0xC:
+                    self.log.error(
+                        f"HDR-DDR Read: CRC token error - received {hex(crc_token)}, expected 0xC"
+                    )
                 # Read CRC-5
                 crc_received = await self.recv_hdr_ddr_word(6)
+                crc_received >>= 1
                 # Verify CRC
-                crc_data = cmd_word.to_bytes(2, "big") + [dat.to_bytes(2, "big") for dat in data]
+                crc_data = cmd_word.to_bytes(2, "big")
+                for dat in data:
+                    crc_data += dat.to_bytes(2, "big")
                 crc_expected = calculate_hdr_crc5(crc_data)
                 if crc_received != crc_expected:
-                    self.log.warning(
+                    self.log.error(
                         f"HDR-DDR Read: CRC error - received {hex(crc_received)}, expected {hex(crc_expected)}"
                     )
         else:

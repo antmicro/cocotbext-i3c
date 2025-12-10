@@ -23,9 +23,16 @@ class I3cState(IntEnum):
     TBIT_WR = 7
     TBIT_RD = 8
     CCC = 9
-    STOP = 10
-    AWAIT_SR_OR_P = 11
-    TARGET_RESET = 12
+    CCC_DATA = 10
+    STOP = 11
+    AWAIT_SR_OR_P = 12
+    TARGET_RESET = 13
+    HDR_DDR_HEADER = 14
+    HDR_BT_HEADER = 15
+    HDR_DONE = 16
+    HDR_ERR = 17
+    HDR_DDR_READ = 18
+    HDR_DDR_WRITE = 19
 
 
 @dataclass

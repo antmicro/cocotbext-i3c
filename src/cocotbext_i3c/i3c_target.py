@@ -1,16 +1,16 @@
 import logging
 from enum import IntEnum
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 import cocotb
 from cocotb.handle import ModifiableObject
 from cocotb.result import SimTimeoutError
 from cocotb.triggers import (
+    Combine,
     Edge,
     Event,
     FallingEdge,
     First,
-    NextTimeStep,
     ReadOnly,
     RisingEdge,
     with_timeout,
@@ -28,6 +28,7 @@ from .common import (
     report_config,
     with_timeout_event,
 )
+from .hdr_ddr import calculate_hdr_crc5
 
 
 class I3cHeader(IntEnum):
@@ -79,6 +80,10 @@ class I3CMemory:
         for i in range(length):
             self._mem[address + i] = data[i]
         self.write_ptr = (self.write_ptr + length) % self.size
+
+    @property
+    def len(self) -> int:
+        return self.write_ptr - self.read_ptr
 
     def read(self, length: int = 1) -> list[int]:
         data = self._read_mem(self.read_ptr, length)
@@ -174,7 +179,8 @@ class I3CTarget:
             self.log.info(f"TARGET:::Using static address for I3C Target: {hex(address)}")
 
         # Initialize memory
-        self._mem = I3CMemory(self.log)
+        self._mem = I3CMemory(self.log, size=4096)
+        self._crc_mem = I3CMemory(self.log, size=4096)
         super().__init__(*args, **kwargs)
 
         if self.sda_o is not None:
@@ -194,15 +200,16 @@ class I3CTarget:
         self.monitor_idle = Event()
         cocotb.start_soon(self._run())
 
-        self.hdr_exit_detected = False
+        self.hdr_rstart_detected = Event()
+        cocotb.start_soon(self._detect_hdr_rstart())
+        self.hdr_exit_detected = Event()
         cocotb.start_soon(self._detect_hdr_exit())
 
         # HDR mode state tracking
         self.hdr_mode = False
+        self.hdr_ddr = False
+        self.hdr_bt = False
         self.last_ccc = None  # Track last received CCC
-
-    def set_hdr_mode(self, enable: bool):
-        self.hdr_mode = enable
 
     @property
     def bus_active(self) -> bool:
@@ -345,6 +352,23 @@ class I3CTarget:
             state = await self.check_start(repeated=True)
         return state
 
+    async def detect_start_or_stop(self) -> I3cState:
+        """
+        Detect repeated START (Sr) or STOP (P) condition for read / write messages.
+        """
+        state = None
+        assert self.bus_active
+        while True:
+            await Edge(self.sda_i)
+            await ReadOnly()
+            if self.scl:
+                state = I3cState.STOP
+                if self.sda == 0:
+                    state = I3cState.RS
+                    await FallingEdge(self.scl_i)
+                break
+        return state
+
     async def recv_bit(self) -> bool:
         assert self.bus_active
         # Sample data on the rising clock edge
@@ -376,48 +400,15 @@ class I3CTarget:
         await FallingEdge(self.scl_i)
         self.sda = 1
 
-    async def check_hdr_preamble(self):
-        """
-        Detect HDR preamble pattern (alternating 0/1 on SDA while SCL toggles).
-        Returns True if valid preamble detected, False otherwise.
-        """
-        if not self.hdr_mode:
-            return False
-
-        self.log.debug("Checking for HDR preamble")
-
-        # Look for alternating pattern: 0, 1 on SDA with SCL toggles
-        try:
-            # Wait for SCL low
-            if self.scl:
-                await FallingEdge(self.scl_i)
-
-            # Check for bit 0
-            await RisingEdge(self.scl_i)
-            if self.sda != 0:
-                return False
-
-            # Wait for next SCL edge
-            await FallingEdge(self.scl_i)
-
-            # Check for bit 1
-            if self.sda != 1:
-                return False
-
-            self.log.info("HDR preamble detected!")
-            return True
-
-        except Exception as e:
-            self.log.debug(f"HDR preamble check failed: {e}")
-            return False
-
     async def recv(self, bits_num=8) -> int:
         b = 0
         for _ in range(bits_num):
             b = (b << 1) | await self.recv_bit()
         return b
 
-    async def recv_byte(self, is_data: bool = True, ack=True, check_for_stop=False) -> int:
+    async def recv_byte(
+        self, is_data: bool = True, ack: bool = True, check_for_stop: bool = False
+    ) -> int:
         length = 8
         s, b = 0, 0
         next_state = None
@@ -438,6 +429,26 @@ class I3CTarget:
             await self.ack()
 
         next_state = await self.check_start(repeated=True)
+        return b, next_state
+
+    async def recv_ccc(self) -> tuple[int, I3cState]:
+        b = 0
+
+        async def _recv_ccc():
+            next_state = I3cState.CCC_DATA
+            b = await self.recv(8)
+            await self.verify_parity(b)
+            return (b, next_state)
+
+        stop_or_rstart = cocotb.start_soon(self.detect_start_or_stop())
+        ccc = cocotb.start_soon(_recv_ccc())
+        res = await First(ccc.join(), stop_or_rstart.join())
+        if ccc.done():
+            b, next_state = res
+            stop_or_rstart.kill()
+        else:
+            ccc.kill()
+            next_state = res
         return b, next_state
 
     async def send_bit(self, bit: bool):
@@ -492,7 +503,7 @@ class I3CTarget:
         else:
             self.header = I3cHeader.NON_APPLICABLE
 
-    async def handle_read(self) -> int:
+    async def handle_read(self) -> I3cState:
         """I3C Private Read Transfer"""
         next_state = None
         while not next_state:
@@ -503,7 +514,7 @@ class I3CTarget:
         self.state = next_state
         return next_state
 
-    async def handle_write(self) -> None:
+    async def handle_write(self) -> I3cState:
         """I3C Private Write Transfer"""
         next_state = None
         while not next_state:
@@ -514,14 +525,20 @@ class I3CTarget:
         self.state = next_state
         return next_state
 
-    async def handle_message(self):
+    async def handle_message(self) -> I3cState:
         await self.wait_header()
         match self.header:
             case I3cHeader.RESERVED:
-                self.state = I3cState.AWAIT_SR_OR_P
-                next_state = None
-                while not next_state:
-                    next_state = await self.check_start_or_stop()
+                self.state = I3cState.CCC
+                ccc_value, next_state = await self.recv_ccc()
+                if next_state == I3cState.CCC_DATA and ccc_value in [0x20, 0x23]:
+                    self.hdr_mode = True
+                    if ccc_value == 0x20:
+                        self.hdr_ddr = True
+                        next_state = I3cState.HDR_DDR_HEADER
+                    elif ccc_value == 0x23:
+                        self.hdr_bt = True
+                        next_state = I3cState.HDR_BT_HEADER
             case I3cHeader.READ:
                 next_state = await self.handle_read()
             case I3cHeader.WRITE:
@@ -543,14 +560,238 @@ class I3CTarget:
                 )
         return next_state
 
-    def clear_hdr_exit_flag(self):
-        self.hdr_exit_detected = False
+    def calc_hdr_parity(self, data: Iterable[int]) -> int:
+        """
+        Calculates HDR parity value based on data
+
+        Args:
+            data: Source data to calculate parity
+        """
+        base = 0
+        for dat in data:
+            base ^= dat
+        base = (base ^ (base >> 4)) & 0xF
+        base = (base ^ (base >> 2)) & 0x3
+        base = (base ^ 1) & 0x3
+        return base
+
+    async def send_ddr(
+        self, word: int, bits_num: int, msb: bool = True, stop_on_mismath: bool = False
+    ) -> None:
+        assert bits_num % 2 == 0
+        drive = True
+        start = 0
+        end = bits_num
+        step = 1
+        if msb:
+            start = end - 1
+            end = -1
+            step = -1
+        for i in range(start, end, step):
+            if drive:
+                self.sda = (word >> i) & 1
+            else:
+                self.sda = 1
+            if self.scl:
+                await FallingEdge(self.scl_i)
+            else:
+                await RisingEdge(self.scl_i)
+            if self.sda != (word >> i) & 1 and stop_on_mismath:
+                drive = False
+
+    async def recv_ddr(self, bits_num: int, msb: bool = True) -> int:
+        assert bits_num % 2 == 0
+        word = 0
+        if self.scl:
+            await FallingEdge(self.scl_i)
+        for i in range(bits_num):
+            if self.scl:
+                await FallingEdge(self.scl_i)
+            else:
+                await RisingEdge(self.scl_i)
+            if msb:
+                word = word << 1 | self.sda
+            else:
+                word |= self.sda << i
+        return word
+
+    async def handle_ddr_header(self) -> I3cState:
+        preamble = await self.recv_ddr(2)
+        if preamble != 0x1:
+            self.log.error(f"Incorrect HDR-DDR command preamble: expected 0x01 got {preamble}")
+            return I3cState.HDR_ERR
+        command_code = await self.recv_ddr(8)
+        target_addr = await self.recv_ddr(8)
+        parity = await self.recv_ddr(2)
+        expected_parity = self.calc_hdr_parity([command_code, target_addr])
+        if parity != expected_parity:
+            self.log.error(
+                f"Incorrect HDR-DDR command parity: expected {expected_parity} got {parity}"
+            )
+            return I3cState.HDR_ERR
+        self.log.info(
+            f"Preamble {hex(preamble)}, command code {hex(command_code)}, "
+            f"target address {hex(target_addr>>1)}, parity {hex(parity)}"
+        )
+        if (target_addr >> 1) != self.address:
+            return I3cState.HDR_DONE
+        self._crc_mem.clear()
+        self._crc_mem.write([command_code, target_addr], 2)
+        if (command_code & 0x80) != 0:
+            return I3cState.HDR_DDR_READ
+        return I3cState.HDR_DDR_WRITE
+
+    async def handle_ddr_write(self) -> I3cState:
+        self.log.info("HDR-DDR write")
+        first_loop = True
+        accept_parity = False
+        while True:
+            if not accept_parity and not first_loop:
+                self.log.error("Incorrect HDR-DDR write parity")
+            preamble_value = 0x3 if accept_parity else 0x2
+            recv_t = cocotb.start_soon(self.recv_ddr(2))
+            send_t = cocotb.start_soon(self.send_ddr(preamble_value, 2, stop_on_mismath=True))
+            await Combine(recv_t.join(), send_t.join())
+            # Release SDA
+            self.sda = 1
+            preamble = recv_t.result()
+            self.log.info(f"Preamble {preamble}")
+            if preamble == 0x1:
+                break
+            elif preamble == 0x2 and not first_loop:
+                self.log.warning("HDR-DDR write terminated")
+                return I3cState.HDR_ERR
+            elif preamble != 0x2 and first_loop:
+                self.log.error(f"Incorrect HDR-DDR write preamble: expected 0x02 got {preamble}")
+                return I3cState.HDR_ERR
+            word = await self.recv_ddr(16)
+            _bytes = word.to_bytes(2, "big")
+            parity = await self.recv_ddr(2)
+            expected_parity = self.calc_hdr_parity(_bytes)
+            self._mem.write(_bytes, len(_bytes))
+            self._crc_mem.write(_bytes, len(_bytes))
+            accept_parity = expected_parity == parity
+            first_loop = False
+        crc_token = await self.recv_ddr(4)
+        if crc_token != 0xC:
+            self.log.error("Incorrect HDR-DDR write CRC token")
+            return I3cState.HDR_ERR
+        crc = await self.recv_ddr(6)
+        crc >>= 1
+        expected_crc = calculate_hdr_crc5(self._crc_mem.read(self._crc_mem.len))
+        if crc != expected_crc:
+            self.log.error("Incorrect HDR-DDR write CRC value")
+            return I3cState.HDR_ERR
+        self._crc_mem.clear()
+        return I3cState.HDR_DONE
+
+    async def handle_ddr_read(self) -> I3cState:
+        self.log.info("HDR-DDR read")
+        recv_t = cocotb.start_soon(self.recv_ddr(2))
+        send_t = cocotb.start_soon(self.send_ddr(0x2, 2))
+        await Combine(recv_t.join(), send_t.join())
+        preamble = recv_t.result()
+        self.log.info(f"Preamble {preamble}")
+        if preamble != 0x2:
+            self.log.error(f"Incorrect HDR-DDR read preamble: expected 0x02 got {preamble}")
+            return I3cState.HDR_ERR
+        word = 0
+        for data in self._mem.read(2):
+            word <<= 8
+            word |= data
+            self._crc_mem.write([data])
+        await self.send_ddr(word, 16)
+        parity = self.calc_hdr_parity(word.to_bytes(2, "big"))
+        await self.send_ddr(parity, 2)
+        while self._mem.len > 0:
+            recv_t = cocotb.start_soon(self.recv_ddr(2))
+            send_t = cocotb.start_soon(self.send_ddr(0x3, 2))
+            await Combine(recv_t.join(), send_t.join())
+            preamble = recv_t.result()
+            self.log.info(f"Preamble {preamble}")
+            if preamble == 0x2:
+                self.log.warning("HDR-DDR read terminated")
+                return I3cState.HDR_ERR
+            word = 0
+            for data in self._mem.read(2):
+                word <<= 8
+                word |= data
+                self._crc_mem.write([data])
+            await self.send_ddr(word, 16)
+            parity = self.calc_hdr_parity(word.to_bytes(2, "big"))
+            await self.send_ddr(parity, 2)
+
+        # Send CRC
+        await self.send_ddr(0x1, 2)
+        await self.send_ddr(0xC, 4)
+        crc = calculate_hdr_crc5(self._crc_mem.read(self._crc_mem.len)) << 1
+        # Release SDA
+        crc |= 1
+        await self.send_ddr(crc, 6)
+
+        self._crc_mem.clear()
+        return I3cState.HDR_DONE
+
+    async def handle_hdr_message(self):
+        self.log.info(f"Starting HDR handling {self.state.name}")
+        match self.state:
+            case I3cState.HDR_DDR_HEADER:
+                next_state = await self.handle_ddr_header()
+            case I3cState.HDR_BT_HEADER:
+                pass
+            case I3cState.HDR_DDR_READ:
+                next_state = await self.handle_ddr_read()
+            case I3cState.HDR_DDR_WRITE:
+                next_state = await self.handle_ddr_write()
+            case I3cState.HDR_ERR | I3cState.HDR_DONE:
+                await First(self.hdr_exit_detected.wait(), self.hdr_rstart_detected.wait())
+                if self.hdr_exit_detected.is_set():
+                    self.hdr_exit_detected.clear()
+                    next_state = None
+                    while not next_state:
+                        next_state = await self.check_stop()
+                elif self.hdr_ddr:
+                    self.hdr_rstart_detected.clear()
+                    next_state = I3cState.HDR_DDR_HEADER
+                else:
+                    self.hdr_rstart_detected.clear()
+                    next_state = I3cState.HDR_BT_HEADER
+            case _:
+                raise Exception(
+                    f"Unknown HDR state: {self.state.name} "
+                    f"""Expected one of: {[
+                        I3cState.HDR_DDR_HEADER.name,
+                        I3cState.HDR_BT_HEADER.name,
+                        I3cState.HDR_ERR.name,
+                        I3cState.HDR_DONE.name,
+                        I3cState.HDR_DDR_READ.name,
+                        I3cState.HDR_DDR_WRITE.name,
+                    ]}"""
+                )
+        return next_state
+
+    async def _detect_hdr_rstart(self):
+        self.log.info("Starting HDR RStart Pattern detection monitor")
+        while True:
+            if not (not self.scl and self.sda):
+                await First(Edge(self.scl_i), Edge(self.sda_i))
+                continue
+
+            for i in range(3):
+                rising_scl = RisingEdge(self.scl_i)
+                falling_sda = FallingEdge(self.sda_i)
+                trigger = await First(rising_scl, falling_sda)
+                if (trigger == rising_scl and i < 2) or (trigger == falling_sda and i == 2):
+                    break
+            else:
+                self.hdr_rstart_detected.set()
+                self.log.info("Detected HDR RStart Pattern!")
 
     async def _detect_hdr_exit(self):
         self.log.info("Starting HDR Exit Pattern detection monitor")
         while True:
             if not (not self.scl and self.sda):
-                await NextTimeStep()
+                await First(Edge(self.scl_i), Edge(self.sda_i))
                 continue
 
             for _ in range(4):
@@ -559,13 +800,12 @@ class I3CTarget:
                 trigger = await First(rising_scl, falling_sda)
                 if trigger == rising_scl:
                     break
-
-            if trigger == rising_scl:
-                continue
-
-            self.hdr_exit_detected = True
-            self.hdr_mode = False
-            self.log.info("Detected HDR Exit Pattern - returning to SDR mode!")
+            else:
+                self.hdr_exit_detected.set()
+                self.hdr_mode = False
+                self.hdr_ddr = False
+                self.hdr_bt = False
+                self.log.info("Detected HDR Exit Pattern - returning to SDR mode!")
 
     async def send_ibi(self, mdb=None, data: bytearray = None):
         # Disable bus monitor and wait for bus to enter idle state
@@ -613,35 +853,25 @@ class I3CTarget:
             # From this moment monitor is busy and should not be interrupted
             self.monitor_idle.clear()
 
-            # In HDR mode, check for HDR preamble instead of START
-            if self.hdr_mode:
-                if await self.check_hdr_preamble():
-                    self.log.info("HDR transaction detected, monitoring HDR traffic")
-                    # For now, just wait for HDR exit
-                    # Full HDR transaction handling would go here
-                    await NextTimeStep()
-                else:
-                    await with_timeout_event(
-                        self.monitor_enable,
-                        First(Edge(self.sda_i), Edge(self.scl_i)),
-                        1,
-                    )
+            # SDR mode: Wait for START condition
+            next_state = await self.check_start(repeated=False)
+            if next_state:
+                self.state = next_state
             else:
-                # SDR mode: Wait for START condition
-                next_state = await self.check_start(repeated=False)
-                if next_state:
-                    self.state = next_state
+                await with_timeout_event(
+                    self.monitor_enable,
+                    First(Edge(self.sda_i), Edge(self.scl_i)),
+                    1,
+                )
+
+            while self.bus_active:
+                if self.hdr_mode:
+                    # Switch to HDR mode
+                    self.state = await self.handle_hdr_message()
+
+                elif self.state == I3cState.STOP:
+                    self.log.debug("TARGET:::Got STOP.")
+                    self.state = I3cState.FREE
+                    self.header = I3cHeader.NONE
                 else:
-                    await with_timeout_event(
-                        self.monitor_enable,
-                        First(Edge(self.sda_i), Edge(self.scl_i)),
-                        1,
-                    )
-
-                while self.bus_active:
                     self.state = await self.handle_message()
-
-                    if self.state == I3cState.STOP:
-                        self.log.debug("TARGET:::Got STOP.")
-                        self.state = I3cState.FREE
-                        self.header = I3cHeader.NONE
