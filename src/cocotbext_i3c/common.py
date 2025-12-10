@@ -2,7 +2,7 @@
 import logging
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Callable
+from typing import Callable, Iterable
 
 from cocotb.result import SimTimeoutError
 from cocotb.triggers import NextTimeStep, Timer, with_timeout
@@ -185,9 +185,10 @@ class I3cTargetResetAction(IntEnum):
 @dataclass
 class I3cPRResp:
     nack: bool
-    data: bytearray
+    data: Iterable[int]
 
 
 @dataclass
 class I3cPWResp:
     nack: bool
+    sent_count: int

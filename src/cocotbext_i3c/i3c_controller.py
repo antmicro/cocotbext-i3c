@@ -15,7 +15,6 @@ from cocotb.triggers import (
     FallingEdge,
     First,
     NextTimeStep,
-    ReadOnly,
     RisingEdge,
     Timer,
 )
@@ -32,9 +31,8 @@ from .common import (
     report_config,
     with_timeout_event,
 )
-
-# from .hdr_bt import calculate_hdr_crc16, calculate_hdr_crc32
-from .hdr_ddr import calculate_hdr_crc5, calculate_parity
+from .hdr_bt import calculate_hdr_crc16, calculate_hdr_crc32
+from .hdr_ddr import calculate_hdr_crc5
 
 _T = TypeVar("_T")
 
@@ -402,9 +400,8 @@ class I3cController:
                 await self.remaining_thigh
             else:
                 await self.remaining_tlow
-            self.scl = 0 if scl else 1
-            await ReadOnly()
             return_value = return_value << 1 | self.sda
+            self.scl = 0 if scl else 1
             await self._hold_data()
         # Release SDA
         self.sda = 1
@@ -473,17 +470,23 @@ class I3cController:
 
     async def send_hdr_ddr_write(
         self, addr: int, data: Iterable[int], send_CRC_on_termination: bool = False
-    ) -> None:
+    ) -> I3cPWResp:
         """
         Send HDR-DDR write transaction.
 
         Args:
             addr: 7-bit target address
             data: Data words to write
+            send_CRC_on_termination: send CRC after write termination
+
+        Returns:
+            I3cPWResp
         """
         await self.take_bus_control()
         self.log_info(f"I3C: HDR-DDR Write to {hex(addr)}, data: {list(data)}")
 
+        sent_words = 0
+        nack = False
         premature_termination = False
         # Send preamble
         _ = await self.send_hdr_preamble()
@@ -502,10 +505,13 @@ class I3cController:
         await self.send_hdr_parity(cmd_word)
 
         preamble = await self.send_hdr_preamble([1, 1])
-        if preamble == 0x2:
+        if preamble == 0x3:
+            nack = True
+        elif preamble == 0x2:
             # Send data bytes with parity
             for i, word in enumerate(data):
                 await self.send_hdr_ddr_word(word, 16)
+                sent_words += 1
                 # Send parity bit
                 parity = self.calc_hdr_parity(word)
                 await self.send_hdr_ddr_word(parity, 2)
@@ -523,26 +529,35 @@ class I3cController:
                 if not premature_termination:
                     _ = await self.send_hdr_preamble()
                 await self.send_hdr_ddr_word(crc, 6)
+        else:
+            self.log_error(f"Unknown preamble value: {bin(preamble)}")
 
         self.give_bus_control()
-        self.log_info("I3C: HDR-DDR Write complete")
+        if nack:
+            self.log_info("I3C: HDR-DDR Write failed")
+        else:
+            self.log_info(f"I3C: HDR-DDR Write complete, sent {sent_words} words")
+        return I3cPWResp(nack, sent_words)
 
     async def send_hdr_ddr_read(
         self, addr: int, count: int, recv_CRC_on_termination: bool = False, interrupt: int = -1
-    ) -> bytearray:
+    ) -> I3cPRResp:
         """
         Send HDR-DDR read transaction.
 
         Args:
             addr: 7-bit target address
             count: Number of words to read
+            recv_CRC_on_termination: expect CRC on termination
+            interrupt: Number of the data word that will be interrupted
 
         Returns:
-            Read data bytes
+            I3cPRResp
         """
         await self.take_bus_control()
         self.log_info(f"I3C: HDR-DDR Read from {hex(addr)}, count: {count}")
 
+        nack = False
         premature_termination = False
         # Send preamble
         _ = await self.send_hdr_preamble()
@@ -562,7 +577,9 @@ class I3cController:
 
         data = []
         preamble = await self.send_hdr_preamble([1, 1])
-        if preamble == 0x2:
+        if preamble == 0x3:
+            nack = True
+        elif preamble == 0x2:
             # Read data bytes from target
             for i in range(count):
                 word = await self.recv_hdr_ddr_word(16)
@@ -590,11 +607,16 @@ class I3cController:
                     self.log.warning(
                         f"HDR-DDR Read: CRC error - received {hex(crc_received)}, expected {hex(crc_expected)}"
                     )
+        else:
+            self.log_error(f"Unknown preamble value: {bin(preamble)}")
 
-        self.log_info(f"I3C: HDR-DDR Read complete - received {len(data)} words")
+        if nack:
+            self.log_info("I3C: HDR-DDR Read failed")
+        else:
+            self.log_info(f"I3C: HDR-DDR Read complete - received {len(data)} words")
 
         self.give_bus_control()
-        return data
+        return I3cPRResp(nack, data)
 
     async def send_hdr_bt_word(self, word: int, num_bits: int) -> None:
         """
@@ -615,7 +637,7 @@ class I3cController:
             self.scl = 0 if scl else 1
             await self._hold_data()
 
-    async def recv_hdr_bt_word(self, num_bits: int, target_clk: bool = False) -> int:
+    async def recv_hdr_bt_word(self, num_bits: int, target_SCL: bool = False) -> int:
         """
         Receive a word in HDR-BT mode (DDR), MSB first.
 
@@ -623,7 +645,7 @@ class I3cController:
             num_bits: Number of bits to receive
         """
         return_value = 0
-        if not target_clk:
+        if not target_SCL:
             for i in range(num_bits):
                 scl = self.scl
                 if scl:
@@ -652,8 +674,8 @@ class I3cController:
             base ^= dat
         base = (base ^ (base >> 4)) & 0xF
         base = (base ^ (base >> 2)) & 0x3
-        base = data ^ 1
-        return data
+        base = (base ^ 1) & 0x3
+        return base
 
     async def send_hdr_bt_header(
         self,
@@ -694,7 +716,7 @@ class I3cController:
             | ccc << 43
             | 0x0 << 44
         )
-        parity = self.calc_bt_parity(cmd_word) & 0x3
+        parity = self.calc_bt_parity(cmd_word)
         cmd_word |= parity << 46
         await self.send_hdr_bt_word(cmd_word, 48)
 
@@ -711,10 +733,9 @@ class I3cController:
                 await self.remaining_thigh
             else:
                 await self.remaining_tlow
-            self.scl = 0 if scl else 1
-            await ReadOnly()
             if i < 2:
                 return_value = return_value | (self.sda << i)
+            self.scl = 0 if scl else 1
             await self._hold_data()
         return return_value
 
@@ -728,9 +749,8 @@ class I3cController:
         else:
             data_words -= 1
         data = last_block << 2 | (data_words & 0xF) << 4
-        parity = data ^ (data >> 4)
-        parity = parity ^ (parity >> 2)
-        parity = (parity ^ (parity >> 1) ^ 1) & 1
+        parity = self.calc_bt_parity([data])
+        parity = ((parity >> 1) ^ parity) & 1
         data |= parity << 3
         data |= 0x3
 
@@ -743,20 +763,18 @@ class I3cController:
                 await self.remaining_thigh
             else:
                 await self.remaining_tlow
+            return_value = return_value | (self.sda << i)
             self.scl = 0 if scl else 1
-            await ReadOnly()
-            if i < 2:
-                return_value = return_value | (self.sda << i)
             await self._hold_data()
         return return_value
 
     async def recv_hdr_bt_transition_control(
-        self, target_clk: bool = False, discard_transfer: bool = False
+        self, target_SCL: bool = False, discard_transfer: bool = False
     ) -> int:
         # Build transition byte (8 bits for HDR-BT)
         word = 0xFF if not discard_transfer else 0xFD
         return_value = 0
-        if not target_clk:
+        if not target_SCL:
             for i in range(8):
                 bit = (word >> i) & 1
                 scl = self.scl
@@ -777,118 +795,220 @@ class I3cController:
                 await self._hold_data()
         return return_value
 
-    async def send_hdr_bt_write(self, addr: int, data: Iterable[int]) -> None:
+    async def send_hdr_bt_crc_control(
+        self, use_CRC32: bool = False, terminated: bool = False
+    ) -> None:
+        use_CRC32 = 1 if use_CRC32 else 0
+        terminated = 1 if terminated else 0
+        ctrl_data = 0x0 | use_CRC32 << 5 | terminated << 6
+        parity = self.calc_bt_parity([ctrl_data])
+        parity = ((parity >> 1) ^ parity) & 1
+        ctrl_data |= parity << 3
+        await self.send_hdr_bt_word(ctrl_data, 8)
+
+    async def send_hdr_bt_transition_verify(self) -> int:
+        word = 0x3
+        return_value = 0
+        for i in range(8):
+            bit = (word >> i) & 1
+            scl = self.scl
+            self.sda = bit
+            if scl:
+                await self.remaining_thigh
+            else:
+                await self.remaining_tlow
+            if i < 2:
+                return_value = return_value | (self.sda << i)
+            self.scl = 0 if scl else 1
+            await self._hold_data()
+        return return_value
+
+    async def recv_hdr_bt_transition_verify(
+        self, accepted: bool = True, target_SCL: bool = False
+    ) -> int:
+        accepted = 0 if accepted else 1
+        word = 1 | accepted << 1
+        return_value = 0
+        if not target_SCL:
+            scl = self.scl
+            if scl:
+                await self.remaining_thigh
+            else:
+                await self.remaining_tlow
+            return_value = return_value | (self.sda << 0)
+            self.scl = 0 if scl else 1
+            await self._hold_data()
+        else:
+            # Handle SCL handoff
+            await Edge(self.scl_i)
+            return_value = return_value | (self.sda << 0)
+            await self._hold_data()
+        for i in range(1, 8):
+            bit = (word >> i) & 1
+            scl = self.scl
+            self.sda = bit
+            if scl:
+                await self.remaining_thigh
+            else:
+                await self.remaining_tlow
+            return_value = return_value | (self.sda << i)
+            self.scl = 0 if scl else 1
+            await self._hold_data()
+        return return_value
+
+    async def send_hdr_bt_write(
+        self,
+        addr: int,
+        data: Iterable[int],
+        use_CRC32: bool = False,
+        command: Optional[Iterable[int]] = None,
+    ) -> I3cPWResp:
         """
         Send HDR-BT write transaction using DDR bulk transfer.
 
         Args:
             addr: 7-bit target address
-            data: Data bytes to write
+            data: Data words to write
+            use_CRC32: use CRC32 instead of CRC16, default CRC16
+            command: bytes to fill cmd0-cmd3, default all 0s
+
+        Returns:
+            I3cPWResp
         """
         await self.take_bus_control()
         self.log_info(f"I3C: HDR-BT Write to {hex(addr)}, data: {list(data)}")
 
-        # Send preamble
-        await self.send_hdr_bt_preamble()
+        # Send header
+        command = [0] * 4 if command is None else command
+        await self.send_hdr_bt_header(addr, command, use_CRC32=use_CRC32)
+        transition = await self.send_hdr_bt_header_transition()
 
-        # Build command word (16 bits like HDR-DDR)
-        # Bits [15:9]: Address (7 bits)
-        # Bit [8]: R/W# (0 = Write)
-        # Bits [7:0]: Command/length information
-        cmd_word = (addr << 9) | (0 << 8) | 0x00
+        if transition == 0x3:
+            self.log_info(f"I3C: HDR-BT Write to {hex(addr)} rejected")
+            self.give_bus_control()
+            return I3cPWResp(True, 0)
 
-        # Send command word
-        await self.send_hdr_bt_word(cmd_word, 16)
+        transfered_words = 0
+        terminated = False
+        crc_values = []
+        data_packets = [data[i : i + 16] for i in range(0, len(data), 16)]
+        for i, data_packet in enumerate(data_packets):
+            last = i == (len(data_packets) - 1)
+            ctrl_pkt = await self.send_hdr_bt_transition_control(
+                last=last, data_words=len(data_packet)
+            )
+            crc_values.append(ctrl_pkt)
+            if (ctrl_pkt & 0x2) == 0:  # NACK from target
+                terminated = True
+                break
+            for j in range(16):
+                data = 0
+                if j < len(data_packet):
+                    transfered_words += 1
+                    data = data_packet[j]
+                    crc_values.append(data.to_bytes(2))
+                await self.send_hdr_bt_word(data, 16)
 
-        # Send data bytes with parity
-        data_bytes = bytearray(data)
-        for byte in data_bytes:
-            await self.send_hdr_bt_word(byte, 8)
-            # Send parity bit
-            parity = calculate_parity(byte)
-            await self.send_hdr_bt_bit(parity)
-
-        # Calculate and send CRC-5
-        crc_data = cmd_word.to_bytes(2, "big") + data_bytes
-        crc = calculate_hdr_crc5(crc_data)
-        await self.send_hdr_bt_word(crc, 5)
+        crc_values = bytearray(crc_values)
+        await self.send_hdr_bt_crc_control(use_CRC32=use_CRC32, terminated=terminated)
+        crc_value = (
+            calculate_hdr_crc32(crc_values) if use_CRC32 else calculate_hdr_crc16(crc_values)
+        )
+        await self.send_hdr_bt_word(crc_value, 32)
+        success = await self.send_hdr_bt_transition_verify()
+        success = True if (success & 2) == 0 else False
 
         self.give_bus_control()
-        self.log_info("I3C: HDR-BT Write complete")
+        if success:
+            self.log_info("I3C: HDR-BT Write complete")
+        else:
+            self.log_info("I3C: HDR-BT Write failed")
+        return I3cPWResp(not success, transfered_words)
 
-    async def send_hdr_bt_read(self, addr: int, count: int) -> bytearray:
+    async def send_hdr_bt_read(
+        self,
+        addr: int,
+        interrupt: int = -1,
+        use_CRC32: bool = False,
+        command: Optional[Iterable[int]] = None,
+        target_SCL: bool = False,
+        allow_delay_blocks: bool = False,
+    ) -> I3cPRResp:
         """
         Send HDR-BT read transaction using DDR bulk transfer.
 
         Args:
             addr: 7-bit target address
-            count: Number of bytes to read
+            interrupt: Number of the data block that will be interrupted
+            use_CRC32: use CRC32 instead of CRC16, default CRC16
+            command: bytes to fill cmd0-cmd3, default all 0s
+            target_SCL: pass SCL control to target, default off
+            allow_delay_blocks: allow for delay blocks, default off
 
         Returns:
-            Read data bytes
+            I3cPRResp
         """
         await self.take_bus_control()
-        self.log_info(f"I3C: HDR-BT Read from {hex(addr)}, count: {count}")
+        self.log_info(f"I3C: HDR-BT Read from {hex(addr)}")
 
-        await self.send_hdr_bt_preamble()
+        # Send header
+        command = [0] * 4 if command is None else command
+        await self.send_hdr_bt_header(
+            addr, command, read=True, use_CRC32=use_CRC32, target_SCL=target_SCL
+        )
+        transition = await self.send_hdr_bt_header_transition(allow_delay_blocks=allow_delay_blocks)
 
-        # Build command word (16 bits)
-        cmd_word = (addr << 9) | (1 << 8) | 0x00
+        if transition == 0x3:
+            self.log_info(f"I3C: HDR-BT Read from {hex(addr)} rejected")
+            self.give_bus_control()
+            return I3cPRResp(True, [])
 
-        # Send command word
-        await self.send_hdr_bt_word(cmd_word, 16)
-
-        # Read data bytes from target (DDR mode)
-        data = bytearray()
-        for _ in range(count):
-            byte_val = 0
-            # Read 8 bits on both SCL edges
-            for bit_idx in range(8):
-                # Read on falling edge
-                self.scl = 0
-                await self.tdig_l
-                if self.sda_i is not None:
-                    byte_val = (byte_val << 1) | int(self.sda)
-
-                # Read on rising edge
-                self.scl = 1
-                await self.tdig_h
-
-            data.append(byte_val)
-
-            # Read and verify parity bit
-            self.scl = 0
-            await self.tdig_l
-            if self.sda_i is not None:
-                parity_bit = int(self.sda)
-                expected_parity = calculate_parity(byte_val)
-                if parity_bit != expected_parity:
-                    self.log.warning(f"HDR-BT Read: Parity error on byte {hex(byte_val)}")
-            self.scl = 1
-            await self.tdig_h
-
-        # Read CRC-5
-        crc_received = 0
-        for _ in range(5):
-            self.scl = 0
-            await self.tdig_l
-            if self.sda_i is not None:
-                crc_received = (crc_received << 1) | int(self.sda)
-            self.scl = 1
-            await self.tdig_h
-
-        # Verify CRC
-        crc_data = cmd_word.to_bytes(2, "big") + data
-        crc_expected = calculate_hdr_crc5(crc_data)
-        if crc_received != crc_expected:
-            self.log.warning(
-                f"HDR-BT Read: CRC error - received {hex(crc_received)}, expected {hex(crc_expected)}"
+        terminated = False
+        finished = False
+        crc_values = []
+        data_packets = []
+        while not finished:
+            ctrl_pkt = await self.recv_hdr_bt_transition_verify(
+                target_SCL=target_SCL, discard_transfer=(interrupt == 0)
             )
+            crc_values.append(ctrl_pkt)
 
-        self.log_info(f"I3C: HDR-BT Read complete - received {len(data)} bytes")
+            if interrupt == 0:
+                terminated = True
+                break
+            block_delay = (ctrl_pkt & 0x10) != 0
+            last = (ctrl_pkt & 0x4) != 0
+            last_count = ((ctrl_pkt & 0xF0) >> 4) + 1
+            finished = last
+            if not block_delay:
+                interrupt -= 1
+            for i in range(16):
+                word = await self.recv_hdr_bt_word(16, target_SCL=target_SCL)
+                if not block_delay and (not last or i < last_count):
+                    data_packets.append(word)
+                    crc_values.append(word.to_bytes(2))
+
+        crc_values = bytearray(crc_values)
+        expected_crc_value = (
+            calculate_hdr_crc32(crc_values) if use_CRC32 else calculate_hdr_crc16(crc_values)
+        )
+        crc_ctrl = await self.recv_hdr_bt_word(8, target_SCL=target_SCL)
+        crc_value = await self.recv_hdr_bt_word(32, target_SCL=target_SCL)
+
+        use_CRC32 = 1 if use_CRC32 else 0
+        accepted = ((crc_ctrl >> 5) & 1) == use_CRC32
+        terminated = 1 if terminated else 0
+        accepted &= ((crc_ctrl >> 6) & 1) == terminated
+        accepted &= expected_crc_value == crc_value
+        success = await self.recv_hdr_bt_transition_verify(accepted=accepted, target_SCL=target_SCL)
+        success = True if (success & 2) == 0 else False
 
         self.give_bus_control()
-        return data
+        if success:
+            self.log_info("I3C: HDR-BT Read complete - received {len(data_packets)} words")
+        else:
+            self.log_info("I3C: HDR-BT Read failed")
+        return I3cPRResp(not success, data_packets)
 
     async def send_target_reset_pattern(self) -> None:
         await self.take_bus_control()
@@ -1222,7 +1342,7 @@ class I3cController:
             await self.send_stop()
 
         self.give_bus_control()
-        return I3cPWResp(not ack)
+        return I3cPWResp(not ack, len(data))
 
     async def i3c_read(
         self,
