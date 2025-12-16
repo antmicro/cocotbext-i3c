@@ -539,6 +539,12 @@ class I3CTarget:
                     elif ccc_value == 0x23:
                         self.hdr_bt = True
                         next_state = I3cState.HDR_BT_HEADER
+                elif next_state == I3cState.CCC_DATA:
+                    next_state = None
+                    while not next_state:
+                        next_state = await self.check_start_or_stop()
+                    self.header = I3cHeader.NONE
+
             case I3cHeader.READ:
                 next_state = await self.handle_read()
             case I3cHeader.WRITE:
