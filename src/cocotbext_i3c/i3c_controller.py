@@ -1343,12 +1343,14 @@ class I3cController:
         stop: bool = True,
         mode: I3cXferMode = I3cXferMode.PRIVATE,
         inject_tbit_err: bool = False,
+        i3c_header: bool = True
     ) -> I3cPWResp:
         """I3C Private Write transfer"""
         await self.take_bus_control()
         self.log_info(f"I3C: Write data ({mode.name}) {data} @ {hex(addr)}")
-        await self.send_start()
-        await self.write_addr_header(I3C_RSVD_BYTE)
+        if(i3c_header):
+            await self.send_start()
+            await self.write_addr_header(I3C_RSVD_BYTE)
         await self.send_start()
         ack = await self.write_addr_header(addr)
         if ack:
