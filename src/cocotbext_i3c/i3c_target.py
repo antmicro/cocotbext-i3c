@@ -149,6 +149,7 @@ class I3CTarget:
         sda_o: ModifiableObject,
         scl_i: ModifiableObject,
         scl_o: ModifiableObject,
+        phy_sel_od_pp_i: Optional[ModifiableObject] = None,
         debug_state_o: Optional[ModifiableObject] = None,
         debug_detected_header_o: Optional[ModifiableObject] = None,
         timings: Optional[I3cTargetTimings] = None,
@@ -164,11 +165,13 @@ class I3CTarget:
         self.sda_o = sda_o
         self.scl_i = scl_i
         self.scl_o = scl_o
+        self.phy_sel_od_pp_i = phy_sel_od_pp_i
         self.debug_state_o = debug_state_o
         self.debug_detected_header_o = debug_detected_header_o
         self.speed = speed
         self.address = address
         self.max_read_length = max_read_length
+        self.first_transaction = True
 
         if timings is None:
             timings = I3cTargetTimings()
@@ -219,10 +222,38 @@ class I3CTarget:
     def state(self) -> I3cState:
         return self._state_
 
+    def assert_phy_sel_od_pp(self, value: I3cState):
+        """
+        if(value == I3cState.ACK):
+            assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during ACK phase"
+        if(value == I3cState.START):
+            assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during START phase"
+        """
+        match value:
+            case I3cState.FREE:
+                #assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during IDLE phase"
+                # TODO: update this s.t. it doesn't trigger the assertion when switching to STOP
+                pass
+            case I3cState.ACK:
+                assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during ACK phase"
+            case I3cState.START:
+                assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during START phase"
+            case I3cState.ADDR:
+                if(self.first_transaction):
+                    assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during core init ADDR phase"
+                else:
+                    assert self.phy_sel_od_pp_i == 0, "Must be in Push-Pull mode during non init ADDR phase"
+            case _:
+                assert self.phy_sel_od_pp_i == 1, "Must be in Push-Pull mode during normal operation"
+
+
     @state.setter
     def state(self, value: I3cState) -> None:
         self._state_ = value
+        if self.phy_sel_od_pp_i is not None:
+            self.assert_phy_sel_od_pp(value)
         if self.debug_state_o is not None:
+            self.log.debug(f"TARGET::Current Target State is: {I3cState(value).name}")
             self.debug_state_o.setimmediatevalue(value)
 
     @property
@@ -487,6 +518,10 @@ class I3CTarget:
 
     async def wait_header(self) -> None:
         self.state = I3cState.ADDR
+        if self.first_transaction:
+            self.first_transaction = False
+            self.log.info("TARGET:: Completed the first ADDR transaction")
+
         addr_header = await self.recv(bits_num=8)
         addr, is_read = addr_header >> 1, addr_header & 0x1
 
@@ -497,7 +532,7 @@ class I3CTarget:
             await self.ack()
             self.header = I3cHeader.RESERVED
         elif addr == self.address:
-            assert self.header in [I3cHeader.RESERVED, I3cHeader.READ, I3cHeader.WRITE]
+            assert self.header in [I3cHeader.NONE, I3cHeader.READ, I3cHeader.WRITE]
             await self.ack()
             self.header = I3cHeader.READ if is_read else I3cHeader.WRITE
         else:
