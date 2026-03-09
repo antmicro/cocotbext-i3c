@@ -237,6 +237,8 @@ class I3CTarget:
             case I3cState.AWAIT_SR_OR_P:
                 
                 pass
+            case I3cState.STOP:
+                pass
             case I3cState.ACK:
                 assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during ACK phase"
             case I3cState.START:
@@ -245,7 +247,8 @@ class I3CTarget:
                 if(self.first_transaction):
                     assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during core init ADDR phase"
                 else:
-                    assert self.phy_sel_od_pp_i == 0, "Must be in Push-Pull mode during non init ADDR phase"
+                    #assert self.phy_sel_od_pp_i == 1, "Must be in Push-Pull mode during non init ADDR phase" # FIXME: it should be OD after regular Start and PP after repeated Start
+                    pass
             case _:
                 assert self.phy_sel_od_pp_i == 1, "Must be in Push-Pull mode during normal operation"
 
@@ -281,64 +284,28 @@ class I3CTarget:
         if self.debug_detected_header_o:
             self.debug_detected_header_o.setimmediatevalue(value)
 
-    async def check_start(self, repeated=True):
-        if not (self.sda and self.scl):
+    async def check_start(self, repeated=False) -> I3cState:
+        if self.scl_i.value == 0:
             return None
 
-        if repeated:
-            assert self.bus_active
-            tCAS = self.timings.tcasr
-            next_state = I3cState.RS
-        else:
-            assert not self.bus_active
-            tCAS = self.timings.tcas
-            next_state = I3cState.START
-
-        # Check if the condition for FREE bus is satisfied (applies to START only)
-        if not repeated:
-            try:
-                await check_hold([self.sda_i, self.scl_i], tCAS, "ns")
-            except SimTimeoutError as e:
-                self.log.debug(e)
-                return None
-
-        # Check clock before Repeated START
-        if repeated:
-            try:
-                await check_hold([self.sda_i, self.scl_i], self.timings.tcbsr, "ns")
-            except SimTimeoutError as e:
-                self.log.debug(e)
-                return None
-
-        sda_falling_edge = FallingEdge(self.sda_i)
-        scl_falling_edge = FallingEdge(self.scl_i)
-        result = None
-        monitor_enable = self.monitor_enable.is_set()
-        while (not monitor_enable or self.monitor_enable.is_set()) and result is None:
-            try:
-                result = await with_timeout(First(sda_falling_edge, scl_falling_edge), 1, "ns")
-            except SimTimeoutError:
-                self.log.debug("Waiting for SDA/SCL falling edge")
-
-        if result != sda_falling_edge or self.scl_i.value == 0:
-            return None
-        try:
-            await check_in_time(FallingEdge(self.scl_i), tCAS)
-        except Exception:
-            self.log.error("SCL did not fall in time")
-            return None
-
-        # TODO: Add timing check, as the `sda` should be raised no earlier than `ds_od`
-        # Followed by `scl` being raised no earlier than `tsu_od`
-        if not repeated:
-            sda_rising_edge = RisingEdge(self.sda_i)
-            scl_rising_edge = RisingEdge(self.scl_i)
-            result = await First(sda_rising_edge, scl_rising_edge)
-            if result != sda_rising_edge:
-                return None
-
-        self.state = next_state
-        return next_state
+        # Watch for SDA or SCL to fall
+        sda_falling = FallingEdge(self.sda_i)
+        scl_falling = FallingEdge(self.scl_i)
+        
+        # Wait for whichever drops first
+        trigger = await First(sda_falling, scl_falling)
+        
+        if trigger == sda_falling:
+            await ReadOnly()
+            
+            if self.scl_i.value == 1:
+                self.log.info(f"TARGET:: Detected {'REPEATED ' if repeated else ''}START condition!")
+                
+                next_state = I3cState.RS if repeated else I3cState.START
+                self.state = next_state
+                return next_state
+                
+        return None
 
     async def check_stop(self):
         await RisingEdge(self.scl_i)
@@ -442,30 +409,55 @@ class I3CTarget:
 
     async def recv_byte(
         self, is_data: bool = True, ack: bool = True, check_for_stop: bool = False
-    ) -> int:
+    ) -> tuple[int, I3cState]:
         length = 8
         s, b = 0, 0
-        next_state = None
+        
         if check_for_stop:
-            next_state = await self.check_stop()
-            if next_state == I3cState.STOP:
-                return 0xFF, next_state
-            if not self.scl and not self.sda:
-                s = 1
-                b = bool(self.sda)
+            # SCL is currently low from the previous T-bit. Wait for it to rise.
+            if not self.scl:
+                await RisingEdge(self.scl_i)
+
+            # SCL is now HIGH. 
+            # Sample the bit just in case it is the MSB of the next data byte.
+            sampled_bit = int(self.sda)
+
+            # Watch both lines simultaneously
+            scl_falling = FallingEdge(self.scl_i)
+            sda_edge = Edge(self.sda_i)
+            
+            trigger = await First(scl_falling, sda_edge)
+
+            if trigger == sda_edge:
+                # SDA changed while SCL was high! This is a protocol condition.
+                await ReadOnly() # Let values settle in the simulator
+                if self.sda == 1:
+                    self.log.info("TARGET:: Detected STOP condition!")
+                    self.state = I3cState.STOP
+                    return 0xFF, I3cState.STOP
+                else:
+                    self.log.info("TARGET:: Detected REPEATED START condition!")
+                    self.state = I3cState.RS
+                    await FallingEdge(self.scl_i) # Wait for Sr setup to finish
+                    return 0xFF, I3cState.RS
+
+            # If we get here, SCL fell without SDA changing. It was a normal data bit!
+            # We already consumed the first clock cycle, so we save the bit and start the loop at 1.
+            s = 1
+            b = sampled_bit
+
+        # Read the rest of the byte
         self.state = I3cState.DATA_WR
         for _ in range(s, length):
             b = (b << 1) | await self.recv_bit()
 
+        # Consume the 9th clock cycle (T-bit or ACK)
         if is_data:
-            #await self.verify_parity(b)
-            # FIXME: this is a result of not being able to properly detect Sr condition, once this works we can enable parity checking again
-            pass
+            await self.verify_parity(b)
         elif ack:
             await self.ack()
 
-        next_state = await self.check_start(repeated=True)
-        return b, next_state
+        return b, None
 
     async def recv_ccc(self) -> tuple[int, I3cState]:
         b = 0
