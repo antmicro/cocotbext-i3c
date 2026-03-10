@@ -245,10 +245,10 @@ class I3CTarget:
                 assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during START phase"
             case I3cState.ADDR:
                 if(self.first_transaction):
+                    self.first_transaction = False
                     assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during core init ADDR phase"
                 else:
-                    #assert self.phy_sel_od_pp_i == 1, "Must be in Push-Pull mode during non init ADDR phase" # FIXME: it should be OD after regular Start and PP after repeated Start
-                    pass
+                    assert self.phy_sel_od_pp_i == 1, "Must be in Push-Pull mode during non init ADDR phase" # FIXME: it should be OD after regular Start and PP after repeated Start
             case _:
                 assert self.phy_sel_od_pp_i == 1, "Must be in Push-Pull mode during normal operation"
 
@@ -328,6 +328,19 @@ class I3CTarget:
             await check_in_time(FallingEdge(self.scl_i), tCAS)
         except Exception:
             self.log.error("SCL did not fall in time")
+            return None
+        
+        # TODO: Add timing check, as the `sda` should be raised no earlier than `ds_od`
+        # Followed by `scl` being raised no earlier than `tsu_od`
+        if not repeated:
+            sda_rising_edge = RisingEdge(self.sda_i)
+            scl_rising_edge = RisingEdge(self.scl_i)
+            result = await First(sda_rising_edge, scl_rising_edge)
+            if result != sda_rising_edge:
+                return None
+
+        self.state = next_state
+        return next_state
 
 
     async def check_stop(self):
@@ -394,13 +407,13 @@ class I3CTarget:
         return state
 
     async def recv_bit(self) -> bool:
-            assert self.bus_active
-            # Sample data on the rising clock edge
-            if not self.scl:
-                await RisingEdge(self.scl_i)
-            bit = bool(self.sda)
-            await FallingEdge(self.scl_i)
-            return bit
+        assert self.bus_active
+        # Sample data on the rising clock edge
+        if not self.scl:
+            await RisingEdge(self.scl_i)
+        bit = bool(self.sda)
+        await FallingEdge(self.scl_i)
+        return bit
 
     async def verify_parity(self, byte) -> bool:
         self.state = I3cState.TBIT_WR
