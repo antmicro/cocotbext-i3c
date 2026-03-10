@@ -534,7 +534,7 @@ class I3CTarget:
             await self.ack()
             self.header = I3cHeader.RESERVED
         elif addr == self.address:
-            assert self.header in [I3cHeader.RESERVED, I3cHeader.READ, I3cHeader.WRITE]
+            assert self.header in [I3cHeader.NONE, I3cHeader.RESERVED, I3cHeader.READ, I3cHeader.WRITE]
             await self.ack()
             self.header = I3cHeader.READ if is_read else I3cHeader.WRITE
         else:
