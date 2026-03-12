@@ -172,6 +172,7 @@ class I3CTarget:
         self.address = address
         self.max_read_length = max_read_length
         self.first_transaction = True
+        self.was_start = False
 
         if timings is None:
             timings = I3cTargetTimings()
@@ -233,6 +234,8 @@ class I3CTarget:
             case I3cState.FREE:
                 #assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during IDLE phase"
                 # TODO: update this s.t. it doesn't trigger the assertion when switching to STOP
+                self.was_start = True # set this to one in Idle because after Idle there will always come a start
+                self.log.info("Set was start to one in bus free state")
                 pass
             case I3cState.AWAIT_SR_OR_P:
                 
@@ -243,12 +246,14 @@ class I3CTarget:
                 assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during ACK phase"
             case I3cState.START:
                 assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during START phase"
+                self.was_start = True
             case I3cState.ADDR:
-                if(self.first_transaction):
+                if(self.first_transaction or self.was_start):
                     self.first_transaction = False
-                    assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during core init ADDR phase"
+                    self.was_start = False
+                    assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode after START condition"
                 else:
-                    assert self.phy_sel_od_pp_i == 1, "Must be in Push-Pull mode during non init ADDR phase" # FIXME: it should be OD after regular Start and PP after repeated Start
+                    assert self.phy_sel_od_pp_i == 1, "Must be in Push-Pull mode after Restart Condition" # FIXME: it should be OD after regular Start and PP after repeated Start
             case _:
                 assert self.phy_sel_od_pp_i == 1, "Must be in Push-Pull mode during normal operation"
 
