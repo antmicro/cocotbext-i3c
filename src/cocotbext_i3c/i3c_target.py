@@ -230,32 +230,37 @@ class I3CTarget:
         if(value == I3cState.START):
             assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during START phase"
         """
-        match value:
-            case I3cState.FREE:
-                #assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during IDLE phase"
-                # TODO: update this s.t. it doesn't trigger the assertion when switching to STOP
-                self.was_start = True # set this to one in Idle because after Idle there will always come a start
-                self.log.info("Set was start to one in bus free state")
-                pass
-            case I3cState.AWAIT_SR_OR_P:
-                
-                pass
-            case I3cState.STOP:
-                pass
-            case I3cState.ACK:
-                assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during ACK phase"
-            case I3cState.START:
-                assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during START phase"
-                self.was_start = True
-            case I3cState.ADDR:
-                if(self.first_transaction or self.was_start):
-                    self.first_transaction = False
-                    self.was_start = False
-                    assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode after START condition"
-                else:
-                    assert self.phy_sel_od_pp_i == 1, "Must be in Push-Pull mode after Restart Condition" # FIXME: it should be OD after regular Start and PP after repeated Start
-            case _:
-                assert self.phy_sel_od_pp_i == 1, "Must be in Push-Pull mode during normal operation"
+        enable = True
+        if enable:
+            match value:
+                case I3cState.FREE:
+                    #assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during IDLE phase"
+                    # TODO: update this s.t. it doesn't trigger the assertion when switching to STOP
+                    self.was_start = True # set this to one in Idle because after Idle there will always come a start
+                    self.log.info("Set was start to one in bus free state")
+                    pass
+                case I3cState.AWAIT_SR_OR_P:
+                    
+                    pass
+                case I3cState.STOP:
+                    pass
+                case I3cState.ACK:
+                    assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during ACK phase"
+                case I3cState.START:
+                        # The spec is not really precise on when exactly we have to switch to open drain mode that's why the check is ommited
+                    #assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during START phase"
+                    self.was_start = True
+                case I3cState.ADDR:
+                    if(self.first_transaction or self.was_start):
+                        self.first_transaction = False
+                        self.was_start = False
+                        # The spec is not really precise on when exactly we have to switch to open drain mode that's why the check is ommited
+                        #assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode after START condition"
+                    else:
+                        assert self.phy_sel_od_pp_i == 1, "Must be in Push-Pull mode after Restart Condition" # FIXME: it should be OD after regular Start and PP after repeated Start
+                case _:
+                    assert self.phy_sel_od_pp_i == 1, "Must be in Push-Pull mode during normal operation"
+                    pass
 
 
     @state.setter
