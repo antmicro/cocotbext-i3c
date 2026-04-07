@@ -248,6 +248,8 @@ class I3CTarget:
                     assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during ACK phase"
                 case I3cState.DATA_RD:
                     assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during READ phase"
+                case I3cState.TBIT_RD:
+                    assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during READ TBIT phase"
                 case I3cState.START:
                         # The spec is not really precise on when exactly we have to switch to open drain mode that's why the check is ommited
                     #assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during START phase"
