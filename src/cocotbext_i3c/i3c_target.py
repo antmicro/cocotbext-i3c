@@ -230,7 +230,7 @@ class I3CTarget:
         if(value == I3cState.START):
             assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during START phase"
         """
-        enable = True
+        enable = False
         if enable:
             match value:
                 case I3cState.FREE:
