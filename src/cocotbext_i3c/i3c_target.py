@@ -43,6 +43,18 @@ class I3cHeader(IntEnum):
     # Address doesn't match the target or is unhandled CCC
     NON_APPLICABLE = 4
 
+class I3CErrorInjector:
+    """Configuration class for injecting protocol errors."""
+    def __init__(self):
+        # CE2: NACK on Broadcast (0x7E)
+        self.nack_bcast = False
+        # Add future errors here
+        self.nack_directed = False 
+
+    def clear_all(self):
+        self.nack_bcast = False
+        self.nack_directed = False
+
 
 class I3CMemory:
     """
@@ -198,6 +210,8 @@ class I3CTarget:
 
         self._header = I3cHeader.NONE
         report_config(self.speed, timings, self.log.info)
+
+        self.errors = I3CErrorInjector()
 
         self.monitor_enable = Event()
         self.monitor_enable.set()
@@ -451,6 +465,16 @@ class I3CTarget:
         await FallingEdge(self.scl_i)
         self.sda = 1
 
+    async def nack(self):
+        """Simulates a NACK by leaving SDA high (1) during the ACK phase."""
+        self.state = I3cState.ACK # Still in the 9th bit ACK phase window
+        if self.scl:
+            await FallingEdge(self.scl_i)
+        # Open-Drain: Target leaves SDA floating high to signal NACK
+        self.sda = 1 
+        await FallingEdge(self.scl_i)
+        self.sda = 1
+
     async def recv(self, bits_num=8) -> int:
         b = 0
         for _ in range(bits_num):
@@ -545,12 +569,26 @@ class I3CTarget:
 
         if addr == I3C_RSVD_BYTE:
             assert self.header in [I3cHeader.NONE, I3cHeader.READ, I3cHeader.WRITE]
-            await self.ack()
-            self.header = I3cHeader.RESERVED
+            
+            if self.errors.nack_bcast:
+                self.log.info("TARGET:::Error Inject: NACKing Broadcast Address (CE2)")
+                await self.nack()
+                self.header = I3cHeader.NON_APPLICABLE 
+            else:
+                await self.ack()
+                self.header = I3cHeader.RESERVED
+                
         elif addr == self.address:
             assert self.header in [I3cHeader.NONE, I3cHeader.RESERVED, I3cHeader.READ, I3cHeader.WRITE]
-            await self.ack()
-            self.header = I3cHeader.READ if is_read else I3cHeader.WRITE
+            
+            if self.errors.nack_directed:
+                self.log.info("TARGET:::Error Inject: NACKing Directed Address")
+                await self.nack()
+                self.header = I3cHeader.NON_APPLICABLE
+            else:
+                await self.ack()
+                self.header = I3cHeader.READ if is_read else I3cHeader.WRITE
+                
         else:
             self.header = I3cHeader.NON_APPLICABLE
 
@@ -582,6 +620,39 @@ class I3CTarget:
             case I3cHeader.RESERVED:
                 self.state = I3cState.CCC
                 ccc_value, next_state = await self.recv_ccc()
+
+                # SETDASA
+                if next_state == I3cState.CCC_DATA and ccc_value == 0x87:
+                    self.log.info("TARGET::: Received SETDASA CCC")
+
+                    next_state = None
+                    while not next_state:
+                        next_state = await self.check_start_or_stop()
+
+                    if next_state != I3cState.RS:
+                        self.log.error("Expected Repeated Start (Sr) for Directed CCC!")
+                        return next_state
+                        
+                    addr_header = await self.recv(bits_num=8)
+                    target_static_addr = addr_header >> 1
+                    
+                    # 3. Check if this Directed CCC is meant for us
+                    if target_static_addr == self.address:
+                        await self.ack()
+                        
+                        dyn_addr_byte, next_state = await self.recv_byte(is_data=True, ack=True)
+                        
+                        self.address = dyn_addr_byte >> 1 
+                        self.log.info(f"TARGET::: Dynamic address updated to {hex(self.address)}")
+                    else:
+                        await self.nack()
+                        next_state = None
+                        
+                    while not next_state:
+                        next_state = await self.check_start_or_stop()
+                    self.header = I3cHeader.NONE
+                    return next_state
+
                 if next_state == I3cState.CCC_DATA and ccc_value in [0x20, 0x23]:
                     self.hdr_mode = True
                     if ccc_value == 0x20:
