@@ -547,7 +547,7 @@ class I3CTarget:
 
         # Issue end of data if there's no more data to be send
         self.sda = not terminate
-        await RisingEdge(self.scl_i)
+        await FallingEdge(self.scl_i)
         self.sda = 1
 
         # Wait for Sr or P if termination requested
