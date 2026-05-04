@@ -635,7 +635,6 @@ class I3CTarget:
                 send_task.kill()
                 next_state = stop_task.result()
                 self.log.info(f"TARGET:::Detected read abort going to state : {next_state}")
-                self.sda = 1
             else:
                 stop_task.kill()
                 next_state = send_task.result()
