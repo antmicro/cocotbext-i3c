@@ -562,7 +562,28 @@ class I3CTarget:
 
     async def wait_header(self) -> None:
         self.state = I3cState.ADDR
-        addr_header = await self.recv(bits_num=8)
+        
+        from cocotb.triggers import First
+        import cocotb
+        
+        # Race the address reception against the STOP/Sr detector
+        recv_task = cocotb.start_soon(self.recv(bits_num=8))
+        stop_task = cocotb.start_soon(self.detect_start_or_stop())
+        
+        await First(recv_task.join(), stop_task.join())
+        
+        if stop_task.done():
+            # Controller issued a STOP (or another Sr) instead of an address!
+            recv_task.kill()
+            self.state = stop_task.result()
+            self.header = I3cHeader.NONE
+            self.log.info(f"TARGET::: Abort detected ({self.state.name}) while waiting for address header.")
+            return
+            
+        # Address received normally
+        stop_task.kill()
+        addr_header = recv_task.result()
+
         addr, is_read = addr_header >> 1, addr_header & 0x1
 
         self.log.info(f"TARGET:::Address: {hex(addr)} RnW: {is_read}")
@@ -594,12 +615,31 @@ class I3CTarget:
 
     async def handle_read(self) -> I3cState:
         """I3C Private Read Transfer"""
+        from cocotb.triggers import First
+        import cocotb
+        
         next_state = None
         while not next_state:
             self.state = I3cState.DATA_RD
             data = self._mem.read()
             tbit = self._mem.read_ptr < self._mem.write_ptr
-            next_state = await self.send_byte(data[0] & 0xFF, not tbit)
+            
+            # Race the data transmission against the STOP condition detector
+            send_task = cocotb.start_soon(self.send_byte(data[0] & 0xFF, not tbit))
+            stop_task = cocotb.start_soon(self.detect_start_or_stop())
+            
+            # Wait for either the byte to finish sending, or the Controller to abort
+            await First(send_task.join(), stop_task.join())
+            
+            if stop_task.done():
+                send_task.kill()
+                next_state = stop_task.result()
+                self.log.info(f"TARGET:::Detected read abort going to state : {next_state}")
+                self.sda = 1
+            else:
+                stop_task.kill()
+                next_state = send_task.result()
+                
         self.state = next_state
         return next_state
 
@@ -616,7 +656,11 @@ class I3CTarget:
 
     async def handle_message(self) -> I3cState:
         await self.wait_header()
+
         match self.header:
+            case I3cHeader.NONE:
+                self.log.info(f"TARGET::: Exiting message handler early due to bus abort. State: {self.state.name}")
+                return self.state
             case I3cHeader.RESERVED:
                 self.state = I3cState.CCC
                 ccc_value, next_state = await self.recv_ccc()
@@ -678,13 +722,8 @@ class I3CTarget:
                 self.header = I3cHeader.NONE
             case _:
                 raise Exception(
-                    f"Intercepted address header: {self.header}"
-                    "Expected one of:"[
-                        I3cHeader.RESERVED,
-                        I3cHeader.READ,
-                        I3cHeader.WRITE,
-                        I3cHeader.NON_APPLICABLE,
-                    ]
+                    f"Intercepted address header: {self.header}. "
+                    f"Expected one of: {[I3cHeader.RESERVED, I3cHeader.READ, I3cHeader.WRITE, I3cHeader.NON_APPLICABLE]}"
                 )
         return next_state
 
