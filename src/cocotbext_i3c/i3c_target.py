@@ -48,13 +48,19 @@ class I3CErrorInjector:
     def __init__(self):
         # CE2: NACK on Broadcast (0x7E)
         self.nack_bcast = False
-        # Add future errors here
         self.nack_directed = False 
+
+        # CE0: Short Read on CCCs
+        self.ce0_getpid = False
+        self.controller_recovery_enable = False
+        self._has_failed_ce0 = False  # Internal tracker for recovery
 
     def clear_all(self):
         self.nack_bcast = False
         self.nack_directed = False
-
+        self.ce0_getpid = False
+        self.controller_recovery_enable = False
+        self._has_failed_ce0 = False
 
 class I3CMemory:
     """
@@ -185,6 +191,7 @@ class I3CTarget:
         self.max_read_length = max_read_length
         self.first_transaction = True
         self.was_start = False
+        self.pid = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06] # TODO: make this configurable
 
         if timings is None:
             timings = I3cTargetTimings()
@@ -691,6 +698,66 @@ class I3CTarget:
                         await self.nack()
                         next_state = None
                         
+                    while not next_state:
+                        next_state = await self.check_start_or_stop()
+                    self.header = I3cHeader.NONE
+                    return next_state
+                # GETPID
+                elif next_state == I3cState.CCC_DATA and ccc_value == 0x8D:
+                    self.log.info("TARGET::: Received GETPID CCC")
+
+                    next_state = None
+                    while not next_state:
+                        next_state = await self.check_start_or_stop()
+
+                    if next_state != I3cState.RS:
+                        self.log.error("Expected Repeated Start (Sr) for Directed CCC!")
+                        return next_state
+                        
+                    addr_header = await self.recv(bits_num=8)
+                    target_dyn_addr = addr_header >> 1
+                    
+                    if target_dyn_addr == self.address:
+                        await self.ack()
+                        
+                        send_len = 6
+                        if self.errors.ce0_getpid:
+                            if not self.errors.controller_recovery_enable or not self.errors._has_failed_ce0:
+                                send_len = 3  # Inject CE0: Terminate early after 3 bytes
+                                self.log.info(f"TARGET::: Error Inject (CE0): Sending only {send_len} bytes for GETPID")
+                                self.errors._has_failed_ce0 = True
+                            else:
+                                self.log.info("TARGET::: CE0 Recovery Mode: Sending full 6 bytes for GETPID")
+                        
+                        for i in range(send_len):
+                            terminate = (i == send_len - 1)
+                            
+                            send_task = cocotb.start_soon(self.send_byte(self.pid[i], terminate=terminate))
+                            stop_task = cocotb.start_soon(self.detect_start_or_stop())
+                            
+                            await First(send_task.join(), stop_task.join())
+                            
+                            if stop_task.done():
+                                # Controller aborted mid-byte
+                                send_task.kill()
+                                next_state = stop_task.result()
+                                self.log.info(f"TARGET::: Controller aborted GETPID during byte {i}")
+                                self.sda = 1
+                                break
+                            else:
+                                # Byte finished normally
+                                result_state = send_task.result()
+                                if terminate and result_state is None:
+                                    next_state = await stop_task.join()
+                                else:
+                                    stop_task.kill()
+                                    next_state = result_state
+
+                    else:
+                        await self.nack()
+                        next_state = None
+
+                    # Await final bus state (STOP or Sr) to safely exit
                     while not next_state:
                         next_state = await self.check_start_or_stop()
                     self.header = I3cHeader.NONE
