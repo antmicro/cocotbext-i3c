@@ -16,12 +16,11 @@ from cocotb.triggers import (
     with_timeout,
 )
 
-from .common import (
+from .common import (  # calculate_tbit,
     FULL_SPEED,
     I3C_RSVD_BYTE,
     I3cState,
     I3cTargetTimings,
-    calculate_tbit,
     check_hold,
     check_in_time,
     make_timer,
@@ -43,12 +42,14 @@ class I3cHeader(IntEnum):
     # Address doesn't match the target or is unhandled CCC
     NON_APPLICABLE = 4
 
+
 class I3CErrorInjector:
     """Configuration class for injecting protocol errors."""
+
     def __init__(self):
         # CE2: NACK on Broadcast (0x7E)
         self.nack_bcast = False
-        self.nack_directed = False 
+        self.nack_directed = False
 
         # CE0: Short Read on CCCs
         self.ce0_getpid = False
@@ -61,6 +62,7 @@ class I3CErrorInjector:
         self.ce0_getpid = False
         self.controller_recovery_enable = False
         self._has_failed_ce0 = False
+
 
 class I3CMemory:
     """
@@ -191,7 +193,7 @@ class I3CTarget:
         self.max_read_length = max_read_length
         self.first_transaction = True
         self.was_start = False
-        self.pid = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06] # TODO: make this configurable
+        self.pid = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06]  # TODO: make this configurable
 
         if timings is None:
             timings = I3cTargetTimings()
@@ -255,13 +257,13 @@ class I3CTarget:
         if enable:
             match value:
                 case I3cState.FREE:
-                    #assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during IDLE phase"
+                    # assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during IDLE phase"
                     # TODO: update this s.t. it doesn't trigger the assertion when switching to STOP
-                    self.was_start = True # set this to one in Idle because after Idle there will always come a start
+                    self.was_start = True  # set this to one in Idle because after Idle there will always come a start
                     self.log.info("Set was start to one in bus free state")
                     pass
                 case I3cState.AWAIT_SR_OR_P:
-                    
+
                     pass
                 case I3cState.STOP:
                     pass
@@ -270,23 +272,28 @@ class I3CTarget:
                 case I3cState.DATA_RD:
                     assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during READ phase"
                 case I3cState.TBIT_RD:
-                    assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during READ TBIT phase"
+                    assert (
+                        self.phy_sel_od_pp_i == 0
+                    ), "Must be in Open-Drain mode during READ TBIT phase"
                 case I3cState.START:
-                        # The spec is not really precise on when exactly we have to switch to open drain mode that's why the check is ommited
-                    #assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during START phase"
+                    # The spec is not really precise on when exactly we have to switch to open drain mode that's why the check is ommited
+                    # assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode during START phase"
                     self.was_start = True
                 case I3cState.ADDR:
-                    if(self.first_transaction or self.was_start):
+                    if self.first_transaction or self.was_start:
                         self.first_transaction = False
                         self.was_start = False
                         # The spec is not really precise on when exactly we have to switch to open drain mode that's why the check is ommited
-                        #assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode after START condition"
+                        # assert self.phy_sel_od_pp_i == 0, "Must be in Open-Drain mode after START condition"
                     else:
-                        assert self.phy_sel_od_pp_i == 1, "Must be in Push-Pull mode after Restart Condition" # FIXME: it should be OD after regular Start and PP after repeated Start
+                        assert (
+                            self.phy_sel_od_pp_i == 1
+                        ), "Must be in Push-Pull mode after Restart Condition"  # FIXME: it should be OD after regular Start and PP after repeated Start
                 case _:
-                    assert self.phy_sel_od_pp_i == 1, "Must be in Push-Pull mode during normal operation"
+                    assert (
+                        self.phy_sel_od_pp_i == 1
+                    ), "Must be in Push-Pull mode during normal operation"
                     pass
-
 
     @state.setter
     def state(self, value: I3cState) -> None:
@@ -364,7 +371,7 @@ class I3CTarget:
         except Exception:
             self.log.error("SCL did not fall in time")
             return None
-        
+
         # TODO: Add timing check, as the `sda` should be raised no earlier than `ds_od`
         # Followed by `scl` being raised no earlier than `tsu_od`
         if not repeated:
@@ -376,7 +383,6 @@ class I3CTarget:
 
         self.state = next_state
         return next_state
-
 
     async def check_stop(self):
         await RisingEdge(self.scl_i)
@@ -452,16 +458,16 @@ class I3CTarget:
 
     async def verify_parity(self, byte) -> bool:
         self.state = I3cState.TBIT_WR
-        expected_parity_bit = int(calculate_tbit(byte))
+        # expected_parity_bit = int(calculate_tbit(byte))
 
         await RisingEdge(self.scl_i)
 
-        parity_bit = bool(self.sda)
+        # parity_bit = bool(self.sda)
 
-        #assert expected_parity_bit == parity_bit, (
+        # assert expected_parity_bit == parity_bit, (
         #    f"Received transition bit: {parity_bit} doesn't match given data: {hex(byte)}. "
         #    f"Expected {expected_parity_bit}."
-        #)
+        # )
         await FallingEdge(self.scl_i)
 
     async def ack(self):
@@ -474,11 +480,11 @@ class I3CTarget:
 
     async def nack(self):
         """Simulates a NACK by leaving SDA high (1) during the ACK phase."""
-        self.state = I3cState.ACK # Still in the 9th bit ACK phase window
+        self.state = I3cState.ACK  # Still in the 9th bit ACK phase window
         if self.scl:
             await FallingEdge(self.scl_i)
         # Open-Drain: Target leaves SDA floating high to signal NACK
-        self.sda = 1 
+        self.sda = 1
         await FallingEdge(self.scl_i)
         self.sda = 1
 
@@ -569,24 +575,26 @@ class I3CTarget:
 
     async def wait_header(self) -> None:
         self.state = I3cState.ADDR
-        
-        from cocotb.triggers import First
+
         import cocotb
-        
+        from cocotb.triggers import First
+
         # Race the address reception against the STOP/Sr detector
         recv_task = cocotb.start_soon(self.recv(bits_num=8))
         stop_task = cocotb.start_soon(self.detect_start_or_stop())
-        
+
         await First(recv_task.join(), stop_task.join())
-        
+
         if stop_task.done():
             # Controller issued a STOP (or another Sr) instead of an address!
             recv_task.kill()
             self.state = stop_task.result()
             self.header = I3cHeader.NONE
-            self.log.info(f"TARGET::: Abort detected ({self.state.name}) while waiting for address header.")
+            self.log.info(
+                f"TARGET::: Abort detected ({self.state.name}) while waiting for address header."
+            )
             return
-            
+
         # Address received normally
         stop_task.kill()
         addr_header = recv_task.result()
@@ -597,18 +605,23 @@ class I3CTarget:
 
         if addr == I3C_RSVD_BYTE:
             assert self.header in [I3cHeader.NONE, I3cHeader.READ, I3cHeader.WRITE]
-            
+
             if self.errors.nack_bcast:
                 self.log.info("TARGET:::Error Inject: NACKing Broadcast Address (CE2)")
                 await self.nack()
-                self.header = I3cHeader.NON_APPLICABLE 
+                self.header = I3cHeader.NON_APPLICABLE
             else:
                 await self.ack()
                 self.header = I3cHeader.RESERVED
-                
+
         elif addr == self.address:
-            assert self.header in [I3cHeader.NONE, I3cHeader.RESERVED, I3cHeader.READ, I3cHeader.WRITE]
-            
+            assert self.header in [
+                I3cHeader.NONE,
+                I3cHeader.RESERVED,
+                I3cHeader.READ,
+                I3cHeader.WRITE,
+            ]
+
             if self.errors.nack_directed:
                 self.log.info("TARGET:::Error Inject: NACKing Directed Address")
                 await self.nack()
@@ -616,28 +629,28 @@ class I3CTarget:
             else:
                 await self.ack()
                 self.header = I3cHeader.READ if is_read else I3cHeader.WRITE
-                
+
         else:
             self.header = I3cHeader.NON_APPLICABLE
 
     async def handle_read(self) -> I3cState:
         """I3C Private Read Transfer"""
-        from cocotb.triggers import First
         import cocotb
-        
+        from cocotb.triggers import First
+
         next_state = None
         while not next_state:
             self.state = I3cState.DATA_RD
             data = self._mem.read()
             tbit = self._mem.read_ptr < self._mem.write_ptr
-            
+
             # Race the data transmission against the STOP condition detector
             send_task = cocotb.start_soon(self.send_byte(data[0] & 0xFF, not tbit))
             stop_task = cocotb.start_soon(self.detect_start_or_stop())
-            
+
             # Wait for either the byte to finish sending, or the Controller to abort
             await First(send_task.join(), stop_task.join())
-            
+
             if stop_task.done():
                 send_task.kill()
                 next_state = stop_task.result()
@@ -645,7 +658,7 @@ class I3CTarget:
             else:
                 stop_task.kill()
                 next_state = send_task.result()
-                
+
         self.state = next_state
         return next_state
 
@@ -665,7 +678,9 @@ class I3CTarget:
 
         match self.header:
             case I3cHeader.NONE:
-                self.log.info(f"TARGET::: Exiting message handler early due to bus abort. State: {self.state.name}")
+                self.log.info(
+                    f"TARGET::: Exiting message handler early due to bus abort. State: {self.state.name}"
+                )
                 return self.state
             case I3cHeader.RESERVED:
                 self.state = I3cState.CCC
@@ -682,22 +697,22 @@ class I3CTarget:
                     if next_state != I3cState.RS:
                         self.log.error("Expected Repeated Start (Sr) for Directed CCC!")
                         return next_state
-                        
+
                     addr_header = await self.recv(bits_num=8)
                     target_static_addr = addr_header >> 1
-                    
+
                     # 3. Check if this Directed CCC is meant for us
                     if target_static_addr == self.address:
                         await self.ack()
-                        
+
                         dyn_addr_byte, next_state = await self.recv_byte(is_data=True, ack=True)
-                        
-                        self.address = dyn_addr_byte >> 1 
+
+                        self.address = dyn_addr_byte >> 1
                         self.log.info(f"TARGET::: Dynamic address updated to {hex(self.address)}")
                     else:
                         await self.nack()
                         next_state = None
-                        
+
                     while not next_state:
                         next_state = await self.check_start_or_stop()
                     self.header = I3cHeader.NONE
@@ -713,35 +728,46 @@ class I3CTarget:
                     if next_state != I3cState.RS:
                         self.log.error("Expected Repeated Start (Sr) for Directed CCC!")
                         return next_state
-                        
+
                     addr_header = await self.recv(bits_num=8)
                     target_dyn_addr = addr_header >> 1
-                    
+
                     if target_dyn_addr == self.address:
                         await self.ack()
-                        
+
                         send_len = 6
                         if self.errors.ce0_getpid:
-                            if not self.errors.controller_recovery_enable or not self.errors._has_failed_ce0:
+                            if (
+                                not self.errors.controller_recovery_enable
+                                or not self.errors._has_failed_ce0
+                            ):
                                 send_len = 3  # Inject CE0: Terminate early after 3 bytes
-                                self.log.info(f"TARGET::: Error Inject (CE0): Sending only {send_len} bytes for GETPID")
+                                self.log.info(
+                                    f"TARGET::: Error Inject (CE0): Sending only {send_len} bytes for GETPID"
+                                )
                                 self.errors._has_failed_ce0 = True
                             else:
-                                self.log.info("TARGET::: CE0 Recovery Mode: Sending full 6 bytes for GETPID")
-                        
+                                self.log.info(
+                                    "TARGET::: CE0 Recovery Mode: Sending full 6 bytes for GETPID"
+                                )
+
                         for i in range(send_len):
-                            terminate = (i == send_len - 1)
-                            
-                            send_task = cocotb.start_soon(self.send_byte(self.pid[i], terminate=terminate))
+                            terminate = i == send_len - 1
+
+                            send_task = cocotb.start_soon(
+                                self.send_byte(self.pid[i], terminate=terminate)
+                            )
                             stop_task = cocotb.start_soon(self.detect_start_or_stop())
-                            
+
                             await First(send_task.join(), stop_task.join())
-                            
+
                             if stop_task.done():
                                 # Controller aborted mid-byte
                                 send_task.kill()
                                 next_state = stop_task.result()
-                                self.log.info(f"TARGET::: Controller aborted GETPID during byte {i}")
+                                self.log.info(
+                                    f"TARGET::: Controller aborted GETPID during byte {i}"
+                                )
                                 self.sda = 1
                                 break
                             else:

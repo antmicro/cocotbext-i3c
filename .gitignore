@@ -1,6 +1,7 @@
 # Python cache
 __pycache__
 *egg-info
+.pre-commit-config.yaml
 
 # Simmulation generated files
 sim_build
