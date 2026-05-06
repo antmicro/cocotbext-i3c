@@ -149,7 +149,7 @@ class I3CTarget:
                   - both `P` and write data could be following either previous transition bit or
                     `Sr` condition.
                 * Retrieve 8 bits of data.
-                * Verify the odd-parity bit (fail if incorrect)
+                * FIXME: Verify the odd-parity bit (fail if incorrect)
                 * Save the byte into the memory.
             * Exit the flow upon `STOP` condition. Should then switch I3C Header to `None` and
               I3C State to `FREE`.
@@ -161,6 +161,7 @@ class I3CTarget:
             At some point of the test sequence `Sr` is not correctly intercepted after `DATA_RD`
             state. See also: FIXME in the test_recovery.
     * TODO: Add error recovery - illegal sequence will cause a simulation fail.
+    * FIXME: enable parity bit verification. Currently this is disabled due to wrong parity errors during CCCs
     """
 
     def __init__(
