@@ -1331,7 +1331,7 @@ class I3cController:
 
         while length:
             length = (length - 1) if count else 1
-            (byte, tgt_stop) = await self.recv_byte_t_bit(stop=stop and not length)
+            byte, tgt_stop = await self.recv_byte_t_bit(stop=stop and not length)
             buf.append(byte)
             if tgt_stop:
                 return

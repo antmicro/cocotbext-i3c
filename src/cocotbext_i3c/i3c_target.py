@@ -763,17 +763,14 @@ class I3CTarget:
                     self.hdr_rstart_detected.clear()
                     next_state = I3cState.HDR_BT_HEADER
             case _:
-                raise Exception(
-                    f"Unknown HDR state: {self.state.name} "
-                    f"""Expected one of: {[
+                raise Exception(f"Unknown HDR state: {self.state.name} " f"""Expected one of: {[
                         I3cState.HDR_DDR_HEADER.name,
                         I3cState.HDR_BT_HEADER.name,
                         I3cState.HDR_ERR.name,
                         I3cState.HDR_DONE.name,
                         I3cState.HDR_DDR_READ.name,
                         I3cState.HDR_DDR_WRITE.name,
-                    ]}"""
-                )
+                    ]}""")
         return next_state
 
     async def _detect_hdr_rstart(self):
