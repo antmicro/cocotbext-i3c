@@ -123,20 +123,20 @@ class I3cController:
         def at_least_tsupp(period_ns: float) -> float:
             return period_ns if period_ns > timings.tsupp else timings.tsupp
 
-        self.thd = make_timer(timings.thd)
-        self.tdig_h = make_timer(timings.tdig_h)
-        self.tdig_h_minus_thd = make_timer(at_least_tsupp(timings.tdig_h - timings.thd))
-        self.tdig_l = make_timer(at_least_tsupp(timings.tdig_l))
-        self.tdig_l_minus_thd = make_timer(at_least_tsupp(timings.tdig_l - timings.thd))
-        self.tsu_od = make_timer(timings.tsu_od)
-        self.tcas = make_timer(timings.tcas)
-        self.tcbp = make_timer(timings.tcbp)
-        self.tcbsr = make_timer(timings.tcbsr)
-        self.tcbsr_half = make_timer(timings.tcbsr / 2)
-        self.tcasr = make_timer(timings.tcasr)
-        self.tfree = make_timer(timings.tfree)
-        self.tsco = make_timer(timings.tsco)
-        self.tsu_pp = make_timer(timings.tsu_od)
+        self.thd = make_timer(timings.thd, speed)
+        self.tdig_h = make_timer(timings.tdig_h, speed)
+        self.tdig_h_minus_thd = make_timer(at_least_tsupp(timings.tdig_h - timings.thd), speed)
+        self.tdig_l = make_timer(at_least_tsupp(timings.tdig_l), speed)
+        self.tdig_l_minus_thd = make_timer(at_least_tsupp(timings.tdig_l - timings.thd), speed)
+        self.tsu_od = make_timer(timings.tsu_od, speed)
+        self.tcas = make_timer(timings.tcas, speed)
+        self.tcbp = make_timer(timings.tcbp, speed)
+        self.tcbsr = make_timer(timings.tcbsr, speed)
+        self.tcbsr_half = make_timer(timings.tcbsr / 2, speed)
+        self.tcasr = make_timer(timings.tcasr, speed)
+        self.tfree = make_timer(timings.tfree, speed)
+        self.tsco = make_timer(timings.tsco, speed)
+        self.tsu_pp = make_timer(timings.tsu_od, speed)
 
         self.hold_data = False
 
