@@ -79,7 +79,7 @@ def scaled_timing(period_ns: float, speed: float) -> float:
 
 
 def make_timer(period_ns: float, speed: float = FULL_SPEED) -> Timer:
-    return Timer(scaled_timing(period_ns, speed), "ns")
+    return Timer(scaled_timing(period_ns, speed), "ns", round_mode="round")
 
 
 def calculate_tbit(value: int, inject_tbit_err: bool = False) -> bool:
