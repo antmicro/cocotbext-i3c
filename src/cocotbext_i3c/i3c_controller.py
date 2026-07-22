@@ -178,6 +178,19 @@ class I3cController:
         self.nack_ibis = Event()
         self.max_ibi_data_len = 65536  # This is the max value that can be set.
 
+        # IBI result state
+        self.last_ibi_result = None
+        self.ibi_nack_count = 0
+        self._ibi_event = Event()
+        # One-shot IBI chaining knobs (consumed after next IBI)
+        self._ibi_chain_ccc = None
+        self._ibi_chain_ccc_data = None
+        self._ibi_chain_ccc_addr = None
+        self._ibi_chain_write_addr = None
+        self._ibi_chain_write_data = None
+        self._ibi_skip_data = False
+        self._ibi_max_data = None
+
     def log_info(self, *args):
         if self.silent:
             return
@@ -220,6 +233,79 @@ class I3cController:
     @sda.setter
     def sda(self, value: Any) -> None:
         self.sda_o.value = value
+
+    def set_ibi_chain_ccc(self, ccc, ccc_data=None, ccc_addr=None):
+        """Configure: after next IBI ACK/NACK, chain Sr->CCC before STOP."""
+        assert (
+            self._ibi_chain_write_addr is None
+        ), "Cannot set CCC chain while write chain is active"
+        self._ibi_chain_ccc = ccc
+        self._ibi_chain_ccc_data = ccc_data
+        self._ibi_chain_ccc_addr = ccc_addr
+
+    def set_ibi_chain_write(self, addr, data):
+        """Configure: after next IBI ACK/NACK, chain Sr->Private Write before STOP."""
+        assert self._ibi_chain_ccc is None, "Cannot set write chain while CCC chain is active"
+        self._ibi_chain_write_addr = addr
+        self._ibi_chain_write_data = data
+
+    def set_ibi_skip_data(self, skip=True):
+        """Configure: after next IBI ACK, skip MDB/data read (BCR[2]=0 test)."""
+        self._ibi_skip_data = skip
+
+    def set_ibi_max_data(self, max_len):
+        """Configure: limit IBI data bytes after MDB (truncation test)."""
+        self._ibi_max_data = max_len
+
+    def clear_ibi_chain(self):
+        """Clear all one-shot chaining configuration."""
+        self._ibi_chain_ccc = None
+        self._ibi_chain_ccc_data = None
+        self._ibi_chain_ccc_addr = None
+        self._ibi_chain_write_addr = None
+        self._ibi_chain_write_data = None
+        self._ibi_skip_data = False
+        self._ibi_max_data = None
+
+    def _consume_ibi_chain(self):
+        """Snapshot and clear the one-shot knobs. Returns a dict."""
+        chain = {
+            "ccc": self._ibi_chain_ccc,
+            "ccc_data": self._ibi_chain_ccc_data,
+            "ccc_addr": self._ibi_chain_ccc_addr,
+            "write_addr": self._ibi_chain_write_addr,
+            "write_data": self._ibi_chain_write_data,
+            "skip_data": self._ibi_skip_data,
+            "max_data": self._ibi_max_data,
+        }
+        self.clear_ibi_chain()
+        return chain
+
+    def reset_ibi_state(self):
+        """Reset IBI tracking state. Call before starting a new IBI test sequence."""
+        self.last_ibi_result = None
+        self.ibi_nack_count = 0
+        self._ibi_event.clear()
+
+    async def wait_for_ibi_event(self, timeout=None, units="us"):
+        """Wait for any IBI event (ACK or NACK). Returns the full result dict.
+
+        Args:
+            timeout: Optional timeout value. If None, waits indefinitely.
+            units: Time units for timeout (default: "us")
+
+        Returns:
+            dict with keys: addr, data (bytearray), ack (bool),
+            ccc_response, chain_write_ack
+        """
+        if timeout is not None:
+            from cocotb.triggers import with_timeout
+
+            await with_timeout(self._ibi_event.wait(), timeout, units)
+        else:
+            await self._ibi_event.wait()
+        self._ibi_event.clear()
+        return self.last_ibi_result
 
     def add_target(self, addr):
         """
@@ -1633,12 +1719,28 @@ class I3cController:
         self.give_bus_control()
         raise RuntimeError(f"i3c_ccc_read: exceeded {MAX_IBI_RETRIES} IBI retries")
 
+    _DIRECTED_GET_CCCS = frozenset(
+        {
+            0x8B,  # GETMWL
+            0x8C,  # GETMRL
+            0x8D,  # GETPID
+            0x8E,  # GETBCR
+            0x8F,  # GETDCR
+            0x90,  # GETSTATUS
+            0x91,  # GETACCCR
+            0x94,  # GETMXDS
+            0x95,  # GETCAPS
+            0x99,  # GETXTIME
+        }
+    )
+
     async def _handle_ibi(self, ibi_addr_byte: Optional[int] = None, send_stop: bool = True):
         """
         Receive and IBI from the target, support for MDB is determined from the `self.targets` list
         which should be configured by the testbench. If there is no entry for the target with an address
         received on the bus, assume that the BCR has no set values hence is equal to 0.
         """
+        chain = self._consume_ibi_chain()
 
         # Accept/reject the interrupt by sending an ACK/NACK
         ack = not self.nack_ibis.is_set()
@@ -1652,9 +1754,19 @@ class I3cController:
         else:
             addr = await self.recv_byte(send_ack=ack) >> 1
 
+        result = {
+            "addr": addr,
+            "data": bytearray(),
+            "ack": ack,
+            "ccc_response": None,
+            "chain_write_ack": None,
+        }
+
+        max_data = chain["max_data"] if chain["max_data"] is not None else self.max_ibi_data_len
+
         # Receive IBI
-        data = bytearray()
-        if ack:
+        data = result["data"]
+        if ack and not chain["skip_data"]:
             self.log.info(f"ACK-ed an IBI from 0x{addr:02X}")
             target_idx = self.get_target_idx_by_addr(addr)
             if target_idx is not None:
@@ -1662,7 +1774,7 @@ class I3cController:
                 target = self.targets[target_idx]
                 mdb_enabled = target.bcr & (1 << 2)
                 if mdb_enabled:
-                    await self.recv_until_eod_tbit(data, self.max_ibi_data_len + 1)
+                    await self.recv_until_eod_tbit(data, max_data + 1)
                     self.log.info(
                         f"IBI MDB: 0x{data[0]:02X}, data: ["
                         + " ".join([f"0x{d:02X}" for d in data[1:]])
@@ -1673,12 +1785,56 @@ class I3cController:
         else:
             self.log.info(f"NACK-ed an IBI from 0x{addr:02X}")
 
-        # Send stop
-        if send_stop:
+        # Execute chained action (chains always include their own STOP)
+        if chain["ccc"] is not None:
+            await self._execute_chain_ccc(chain, result)
+        elif chain["write_addr"] is not None:
+            await self._execute_chain_write(chain, result)
+        elif send_stop:
             await self.send_stop()
 
+        # Update result tracking state
+        self.last_ibi_result = result
         if ack:
-            self.got_ibi.set(bytearray([addr]) + data)
+            self.got_ibi.set(bytearray([addr]) + result["data"])
+        else:
+            self.ibi_nack_count += 1
+        self._ibi_event.set()
+
+    async def _execute_chain_ccc(self, chain, result):
+        """Execute Sr->CCC chain after IBI handling."""
+        await self.send_start()
+        # Use base class send_byte for 0x7E after Sr (not arbitrable)
+        await self.write_addr_header(I3C_RSVD_BYTE)
+        await self.send_byte_tbit(chain["ccc"])
+        if chain["ccc_data"] is not None:
+            if chain["ccc_addr"] is not None:
+                is_read = chain["ccc"] in self._DIRECTED_GET_CCCS
+                await self.send_start()
+                await self.write_addr_header(chain["ccc_addr"], read=is_read)
+                if is_read:
+                    resp_data = bytearray()
+                    await self.recv_until_eod_tbit(resp_data, len(chain["ccc_data"]))
+                    result["ccc_response"] = resp_data
+                else:
+                    for byte in chain["ccc_data"]:
+                        await self.send_byte_tbit(byte)
+            else:
+                for byte in chain["ccc_data"]:
+                    await self.send_byte_tbit(byte)
+        await self.send_stop()
+
+    async def _execute_chain_write(self, chain, result):
+        """Execute Sr->Private Write chain after IBI handling."""
+        await self.send_start()
+        await self.write_addr_header(I3C_RSVD_BYTE)
+        await self.send_start()
+        write_ack = await self.write_addr_header(chain["write_addr"])
+        result["chain_write_ack"] = write_ack
+        if write_ack and chain["write_data"]:
+            for byte in chain["write_data"]:
+                await self.send_byte_tbit(byte)
+        await self.send_stop()
 
     def enable_ibi(self, enable):
         """
