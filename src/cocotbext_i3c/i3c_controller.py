@@ -42,6 +42,10 @@ class IbiArbitrationEvent(Exception):
     pass
 
 
+# Max retries when IBI keeps firing during transfer Start->0x7E
+MAX_IBI_RETRIES = 10
+
+
 class I3cXferMode(Enum):
     PRIVATE = 0
     LEGACY_I2C = 1
@@ -1446,30 +1450,40 @@ class I3cController:
         stop: bool = True,
         mode: I3cXferMode = I3cXferMode.PRIVATE,
         inject_tbit_err: bool = False,
-        i3c_header: bool = True,
+        send_rsvd: bool = True,
     ) -> I3cPWResp:
         """I3C Private Write transfer"""
         await self.take_bus_control()
         self.log_info(f"I3C: Write data ({mode.name}) {data} @ {hex(addr)}")
-        if i3c_header:
-            await self.send_start()
-            await self.write_addr_header(I3C_RSVD_BYTE)
-        await self.send_start()
-        ack = await self.write_addr_header(addr)
-        if ack:
-            for i, d in enumerate(data):
-                match mode:
-                    case I3cXferMode.PRIVATE:
-                        await self.send_byte_tbit(d, inject_tbit_err)
-                    case I3cXferMode.LEGACY_I2C:
-                        await self.send_byte(d)
-                self.log_info(f"I3C: wrote byte {hex(d)}, idx={i}")
 
-        if stop:
-            await self.send_stop()
+        for retry in range(MAX_IBI_RETRIES):
+            try:
+                if send_rsvd:
+                    await self.send_start()
+                    await self.write_addr_header(I3C_RSVD_BYTE)
+                await self.send_start()
+
+                ack = await self.write_addr_header(addr)
+                if ack:
+                    for i, d in enumerate(data):
+                        match mode:
+                            case I3cXferMode.PRIVATE:
+                                await self.send_byte_tbit(d, inject_tbit_err)
+                            case I3cXferMode.LEGACY_I2C:
+                                await self.send_byte(d)
+                        self.log_info(f"I3C: wrote byte {hex(d)}, idx={i}")
+
+                if stop:
+                    await self.send_stop()
+
+                self.give_bus_control()
+                return I3cPWResp(not ack, len(data))
+            except IbiArbitrationEvent:
+                self.log_info(f"I3C Write: IBI handled, retrying ({retry + 1})")
+                continue
 
         self.give_bus_control()
-        return I3cPWResp(not ack, len(data))
+        raise RuntimeError(f"i3c_write: exceeded {MAX_IBI_RETRIES} IBI retries")
 
     async def i3c_read(
         self,
@@ -1484,24 +1498,33 @@ class I3cController:
         data = bytearray()
         self.log_info(f"I3C: Read data ({mode.name}) @ {hex(addr)}")
 
-        if send_rsvd:
-            await self.send_start()
-            await self.write_addr_header(I3C_RSVD_BYTE)
-        await self.send_start()
-        ack = await self.write_addr_header(addr, read=True)
-        if ack:
-            match mode:
-                case I3cXferMode.PRIVATE:
-                    await self.recv_until_eod_tbit(data, count)
-                case I3cXferMode.LEGACY_I2C:
-                    for i in range(count):
-                        send_ack = not (i == count - 1)
-                        data.append(await self.recv_byte(send_ack))
-        if stop:
-            await self.send_stop()
+        for retry in range(MAX_IBI_RETRIES):
+            try:
+
+                if send_rsvd:
+                    await self.send_start()
+                    await self.write_addr_header(I3C_RSVD_BYTE)
+                await self.send_start()
+                ack = await self.write_addr_header(addr, read=True)
+                if ack:
+                    match mode:
+                        case I3cXferMode.PRIVATE:
+                            await self.recv_until_eod_tbit(data, count)
+                        case I3cXferMode.LEGACY_I2C:
+                            for i in range(count):
+                                send_ack = not (i == count - 1)
+                                data.append(await self.recv_byte(send_ack))
+                if stop:
+                    await self.send_stop()
+
+                self.give_bus_control()
+                return I3cPRResp(not ack, data)
+            except IbiArbitrationEvent:
+                self.log_info(f"I3C Read: IBI handled, retrying ({retry + 1})")
+                continue
 
         self.give_bus_control()
-        return I3cPRResp(not ack, data)
+        raise RuntimeError(f"i3c_read: exceeded {MAX_IBI_RETRIES} IBI retries")
 
     async def i3c_ccc_write(
         self,
@@ -1522,35 +1545,44 @@ class I3cController:
         else:
             self.log_info(f"I3C: CCC {hex(ccc)} WR (Directed): {log_data}")
 
-        acks = []
+        for retry in range(MAX_IBI_RETRIES):
+            try:
+                acks = []
 
-        await self.send_start()
-        await self.write_addr_header(I3C_RSVD_BYTE)
-        await self.send_byte_tbit(ccc)
-        if defining_byte is not None:
-            await self.send_byte_tbit(defining_byte)
-
-        if is_broadcast:
-            if broadcast_data is not None:
-                for byte in broadcast_data:
-                    await self.send_byte_tbit(byte)
-        else:
-            assert directed_data is not None
-
-            for addr, data in directed_data:
                 await self.send_start()
-                acks.append(await self.write_addr_header(addr))
-                for byte in data:
-                    await self.send_byte_tbit(byte)
+                await self.write_addr_header(I3C_RSVD_BYTE)
+                await self.send_byte_tbit(ccc)
+                if defining_byte is not None:
+                    await self.send_byte_tbit(defining_byte)
 
-        if stop:
-            await self.send_stop()
-        if pull_scl_low:
-            self.scl = 0
-            await self._hold_data()
+                if is_broadcast:
+                    if broadcast_data is not None:
+                        for byte in broadcast_data:
+                            await self.send_byte_tbit(byte)
+                else:
+                    assert directed_data is not None
+
+                    for addr, data in directed_data:
+                        await self.send_start()
+                        acks.append(await self.write_addr_header(addr))
+                        for byte in data:
+                            await self.send_byte_tbit(byte)
+
+                if stop:
+                    await self.send_stop()
+                if pull_scl_low:
+                    self.scl = 0
+                    await self._hold_data()
+
+                self.give_bus_control()
+                return acks
+
+            except IbiArbitrationEvent:
+                self.log_info(f"I3C CCC Write: IBI handled, retrying ({retry + 1})")
+                continue
 
         self.give_bus_control()
-        return acks
+        raise RuntimeError(f"i3c_ccc_write: exceeded {MAX_IBI_RETRIES} IBI retries")
 
     async def i3c_ccc_read(
         self,
@@ -1571,25 +1603,35 @@ class I3cController:
         await self.take_bus_control()
         astr = " ".join([hex(a) for a in addr])
         self.log_info(f"I3C: CCC {hex(ccc)} RD (Directed @ {astr})")
-        responses = []
 
-        await self.send_start()
-        await self.write_addr_header(I3C_RSVD_BYTE)
-        await self.send_byte_tbit(ccc)
-        if defining_byte is not None:
-            await self.send_byte_tbit(defining_byte)
-        for a in addr:
-            await self.send_start()
-            ack = await self.write_addr_header(a, read=True)
-            data = bytearray()
-            await self.recv_until_eod_tbit(data, count, stop=False)
-            responses.append((ack, data))
+        for retry in range(MAX_IBI_RETRIES):
+            try:
+                responses = []
 
-        if stop:
-            await self.send_stop()
+                await self.send_start()
+                await self.write_addr_header(I3C_RSVD_BYTE)
+                await self.send_byte_tbit(ccc)
+                if defining_byte is not None:
+                    await self.send_byte_tbit(defining_byte)
+                for a in addr:
+                    await self.send_start()
+                    ack = await self.write_addr_header(a, read=True)
+                    data = bytearray()
+                    await self.recv_until_eod_tbit(data, count, stop=False)
+                    responses.append((ack, data))
+
+                if stop:
+                    await self.send_stop()
+
+                self.give_bus_control()
+                return responses
+
+            except IbiArbitrationEvent:
+                self.log_info(f"I3C CCC Read: IBI handled, retrying ({retry + 1})")
+                continue
 
         self.give_bus_control()
-        return responses
+        raise RuntimeError(f"i3c_ccc_read: exceeded {MAX_IBI_RETRIES} IBI retries")
 
     async def _handle_ibi(self, ibi_addr_byte: Optional[int] = None, send_stop: bool = True):
         """
