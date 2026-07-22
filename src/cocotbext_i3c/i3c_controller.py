@@ -37,6 +37,11 @@ from .hdr_ddr import calculate_hdr_crc5
 _T = TypeVar("_T")
 
 
+# Sentinel raised when write_addr_header detects an IBI during the 0x7E phase
+class IbiArbitrationEvent(Exception):
+    pass
+
+
 class I3cXferMode(Enum):
     PRIVATE = 0
     LEGACY_I2C = 1
@@ -1219,6 +1224,28 @@ class I3cController:
         await self.tdig_h
         self.hold_data = True
 
+    async def send_bit_arb(self, b: bool) -> tuple:
+        """Drive a bit in open-drain and read back the bus value.
+
+        Per I3C spec Sec.5.1.2.2.1: if the device drives Hi-Z (1) but reads
+        Low (0), another device is driving -> arbitration lost.
+
+        Returns:
+            (arb_ok, bus_value): arb_ok is False if we lost arbitration.
+        """
+        self.scl = 0
+        await self._hold_data()
+        self.sda = b
+        await self.remaining_tlow
+        # Sample bus before raising SCL (same timing as recv_bit)
+        bus_val = bool(self.sda) if self.sda_i is not None else b
+        self.scl = 1
+        await self.tdig_h
+        self.hold_data = True
+        # Arb lost when we released (drove 1) but bus is low (0)
+        arb_ok = not (b and not bus_val)
+        return (arb_ok, bus_val)
+
     async def recv_bit(self) -> bool:
         if not self.bus_active:
             self.send_start()
@@ -1290,6 +1317,34 @@ class I3cController:
         else:
             return await self.recv_bit_od()
 
+    async def send_byte_arb(self, b: int) -> tuple:
+        """Drive a byte with per-bit arbitration check.
+
+        On first arbitration loss, stops driving and switches to reading
+        remaining bits so the bus stays synchronized.
+
+        Returns:
+            (arb_ok, bus_byte): arb_ok is False if arbitration was lost.
+            bus_byte contains the actual byte seen on the bus.
+        """
+        self._state = I3cState.ADDR
+        bus_byte = 0
+        arb_ok = True
+        for i in range(8):
+            bit_val = bool(b & (1 << (7 - i)))
+            if arb_ok:
+                ok, bus_bit = await self.send_bit_arb(bit_val)
+                if not ok:
+                    arb_ok = False
+                    self.log_info(
+                        f"Arbitration lost at bit {i}: " f"drove {int(bit_val)}, bus={int(bus_bit)}"
+                    )
+            else:
+                # Lost arbitration - just read remaining bits
+                bus_bit = await self.recv_bit()
+            bus_byte = (bus_byte << 1) | int(bus_bit)
+        return (arb_ok, bus_byte)
+
     async def recv_byte(self, send_ack: bool) -> int:
         b = 0
         self._state = I3cState.DATA_RD
@@ -1342,11 +1397,32 @@ class I3cController:
         return (b, tgt_eod | stop)
 
     async def write_addr_header(self, addr: int, read: bool = False) -> bool:
-        if addr == I3C_RSVD_BYTE:
+        # Handle IBI arbitration
+        if addr == I3C_RSVD_BYTE and not read:
             self.log_info("Address Header:::Reserved I3C Address Header 0x%02x", addr)
+
+            arb_ok, bus_byte = await self.send_byte_arb(addr << 1)
+            if not arb_ok:
+                # Bus byte is the IBI target's addr+RnW - handle the IBI
+                self.log_info(f"IBI detected during 0x7E: bus_byte=0x{bus_byte:02X}")
+
+                # Handle IBI without STOP - caller will retry with Sr
+                # so the DUT sees a Repeated Start and won't re-arbitrate
+                await self._handle_ibi(bus_byte, send_stop=False)
+                raise IbiArbitrationEvent()
+
+            # No arbitration conflict - receive ACK from target
+            self._state = I3cState.ACK
+            nack = await self.recv_addr_ack()
         else:
-            self.log_info("Address Header:::Address Header to device at I3C address 0x%02x", addr)
-        nack = await self.send_byte((addr << 1) | (0 if not read else 1), addr=True)
+            if addr == I3C_RSVD_BYTE:
+                self.log_info("Address Header:::Reserved I3C Address Header 0x%02x", addr)
+            else:
+                self.log_info(
+                    "Address Header:::Address Header to device at I3C address 0x%02x", addr
+                )
+            nack = await self.send_byte((addr << 1) | (0 if not read else 1), addr=True)
+
         if nack:
             self.log_info("Address Header:::Got NACK")
         else:
