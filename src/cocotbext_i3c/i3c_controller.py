@@ -1861,6 +1861,95 @@ class I3cController:
         self.got_ibi.clear()
         return data
 
+    @staticmethod
+    def _odd_parity(addr: int) -> int:
+        """Compute odd parity over 7-bit address for ENTDAA address byte."""
+        p = 1
+        for i in range(7):
+            p ^= (addr >> i) & 1
+        return p
+
+    async def i3c_entdaa(
+        self,
+        addrs_to_assign: list,
+        inject_te3_parity: bool = False,
+        inject_te4_invalid_rsvd: bool = False,
+        stop_after_n_targets: int = None,
+    ) -> list:
+        """
+        Execute ENTDAA from the controller side.
+
+        Protocol:
+          S + 7E/W + ACK -> 0x07 + T-bit
+          For each target:
+            Sr + 7E/R + ACK
+            Read 64 bits (PID+BCR+DCR) via recv_bit_od
+            Send address byte (addr<<1 | odd_parity) via send_byte
+            Target ACKs
+          P (STOP)
+
+        Args:
+            addrs_to_assign: List of 7-bit addresses to assign to targets.
+            inject_te3_parity: Flip parity bit on address byte (TE3 error).
+            inject_te4_invalid_rsvd: Send 7E/W instead of 7E/R after Sr (TE4).
+            stop_after_n_targets: Issue STOP after N targets (early termination).
+
+        Returns:
+            List of dicts: {pid, bcr, dcr, addr, ack} per target slot.
+        """
+        await self.take_bus_control()
+        results = []
+
+        # Phase 1: S + 7E/W + ACK + ENTDAA CCC (0x07) + T-bit
+        await self.send_start()
+        await self.write_addr_header(I3C_RSVD_BYTE)
+        await self.send_byte_tbit(0x07)
+
+        targets_done = 0
+        for addr in addrs_to_assign:
+            if stop_after_n_targets is not None and targets_done >= stop_after_n_targets:
+                break
+
+            # Phase 2: Sr + 7E/R (or 7E/W for TE4 injection)
+            await self.send_start()
+            if inject_te4_invalid_rsvd:
+                ack = await self.write_addr_header(I3C_RSVD_BYTE, read=False)
+            else:
+                ack = await self.write_addr_header(I3C_RSVD_BYTE, read=True)
+
+            if not ack:
+                # NACK — no more targets to assign (or TE4 error)
+                results.append({"pid": None, "bcr": None, "dcr": None, "addr": addr, "ack": False})
+                break
+
+            # Phase 3: Read 64 bits of device ID (PID[48] + BCR[8] + DCR[8])
+            id_bits = 0
+            for bit_idx in range(64):
+                bit_val = await self.recv_bit_od()
+                id_bits = (id_bits << 1) | int(bit_val)
+
+            # Parse: PID = bits[63:16], BCR = bits[15:8], DCR = bits[7:0]
+            pid = (id_bits >> 16) & 0xFFFFFFFFFFFF
+            bcr = (id_bits >> 8) & 0xFF
+            dcr = id_bits & 0xFF
+
+            # Phase 4: Send address byte with parity
+            parity = self._odd_parity(addr)
+            if inject_te3_parity:
+                parity ^= 1  # Flip parity to cause TE3
+            addr_byte = (addr << 1) | parity
+
+            nack = await self.send_byte(addr_byte)
+            target_acked = not nack
+
+            results.append({"pid": pid, "bcr": bcr, "dcr": dcr, "addr": addr, "ack": target_acked})
+            targets_done += 1
+
+        # Phase 5: STOP
+        await self.send_stop()
+        self.give_bus_control()
+        return results
+
     async def _run(self) -> None:
         """
         This coroutine is supposed to run in background and observe the bus state. It will not be
