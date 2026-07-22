@@ -1515,7 +1515,7 @@ class I3cController:
         self.give_bus_control()
         return responses
 
-    async def _handle_ibi(self):
+    async def _handle_ibi(self, ibi_addr_byte: Optional[int] = None, send_stop: bool = True):
         """
         Receive and IBI from the target, support for MDB is determined from the `self.targets` list
         which should be configured by the testbench. If there is no entry for the target with an address
@@ -1524,7 +1524,15 @@ class I3cController:
 
         # Accept/reject the interrupt by sending an ACK/NACK
         ack = not self.nack_ibis.is_set()
-        addr = await self.recv_byte(send_ack=ack) >> 1
+
+        if ibi_addr_byte is not None:
+            addr = ibi_addr_byte >> 1
+            # Send ACK/NACK
+            self._state = I3cState.ACK
+            # ACK = drive SDA low, NACK = release SDA (high)
+            await self.send_bit(not ack)
+        else:
+            addr = await self.recv_byte(send_ack=ack) >> 1
 
         # Receive IBI
         data = bytearray()
@@ -1548,7 +1556,8 @@ class I3cController:
             self.log.info(f"NACK-ed an IBI from 0x{addr:02X}")
 
         # Send stop
-        await self.send_stop()
+        if send_stop:
+            await self.send_stop()
 
         if ack:
             self.got_ibi.set(bytearray([addr]) + data)
