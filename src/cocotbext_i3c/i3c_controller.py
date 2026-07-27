@@ -1950,6 +1950,16 @@ class I3cController:
         self.give_bus_control()
         return results
 
+    async def set_bus_idle(self) -> None:
+        """
+        Set bus to idle state (both SDA and SCL high).
+
+        Useful for initializing bus state before stress tests.
+        """
+        self.sda = 1
+        self.scl = 1
+        await self.tdig_h
+
     async def _run(self) -> None:
         """
         This coroutine is supposed to run in background and observe the bus state. It will not be
