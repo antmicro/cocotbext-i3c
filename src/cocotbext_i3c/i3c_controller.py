@@ -2236,6 +2236,77 @@ class I3cController:
 
         self.give_bus_control()
 
+    async def send_te0_error(self) -> None:
+        """
+        Trigger a TE0 error by sending START followed by 0x7E/R.
+
+        Per I3C spec Sec.5.1.10.1.1, receipt of 7'h7E/R (broadcast address with
+        read bit) after a dynamic address has been assigned is an Error Type
+        TE0. The target enters HDR error mode (deaf) until it detects the HDR
+        Exit Pattern or the optional 60µs timeout (Sec.5.1.10.1.9).
+
+        After calling this method the controller still holds bus control.
+        The caller must release the bus (e.g., send_hdr_exit + give_bus_control,
+        or send_stop + give_bus_control) when done.
+        """
+        await self.take_bus_control()
+        await self.send_start()
+        await self.write_addr_header(I3C_RSVD_BYTE, read=True)
+
+    async def send_te1_error(self, ccc: int = 0x20) -> None:
+        """
+        Trigger a TE1 error by sending a CCC with bad T-bit parity.
+
+        Per I3C spec Sec.5.1.10.1.2, if the target detects a parity error during
+        a CCC code it cannot know whether the bus has changed to HDR mode.
+        The target enters HDR error mode (deaf) until it detects the HDR Exit
+        Pattern or the optional 60µs timeout (Sec.5.1.10.1.9).
+
+        Args:
+            ccc: CCC command code to send with bad parity (default: ENTHDR0 0x20).
+
+        After calling this method the controller still holds bus control.
+        The caller must release the bus when done.
+        """
+        await self.take_bus_control()
+        await self.send_start()
+        await self.write_addr_header(I3C_RSVD_BYTE)
+        await self.send_byte_tbit(ccc, inject_tbit_err=True)
+
+    async def send_te2_error(
+        self,
+        ccc: int,
+        defining_byte: int = None,
+        target_addr: int = None,
+        corrupt_defining_byte: bool = True,
+    ) -> None:
+        """
+        Trigger a TE2 error by sending a CCC with bad T-bit parity on the
+        defining byte or data byte.
+
+        Per I3C spec Sec.5.1.10.1.3, a parity error on a CCC defining byte
+        or data byte is a TE2 error.
+
+        Args:
+            ccc: CCC command code (sent with correct T-bit parity).
+            defining_byte: If provided, sent after the CCC byte.
+            corrupt_defining_byte: If True and defining_byte is provided,
+                inject bad T-bit parity on the defining byte. If False,
+                the defining byte gets correct parity (caller must send
+                a data byte with bad parity separately).
+
+        After calling this method the controller still holds bus control.
+        The caller must send STOP and give_bus_control().
+        """
+        await self.take_bus_control()
+        await self.send_start()
+        await self.write_addr_header(I3C_RSVD_BYTE)
+        await self.send_byte_tbit(ccc, inject_tbit_err=False)
+        if target_addr is not None:
+            await self.write_addr_header(target_addr)
+        if defining_byte is not None:
+            await self.send_byte_tbit(defining_byte, inject_tbit_err=corrupt_defining_byte)
+
     async def set_bus_idle(self) -> None:
         """
         Set bus to idle state (both SDA and SCL high).
