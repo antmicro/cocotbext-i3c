@@ -1950,6 +1950,292 @@ class I3cController:
         self.give_bus_control()
         return results
 
+    async def send_target_reset_pattern_stress(
+        self,
+        num_transitions: int = 14,
+        tdig_h_ns: Optional[float] = None,
+        t_start_hold_ns: Optional[float] = None,
+        t_stop_hold_ns: Optional[float] = None,
+    ) -> None:
+        """
+        Send a target reset pattern with configurable parameters for stress testing.
+
+        Per I3C spec (5.1.11.3):
+        1. 14 SDA transitions while SCL is kept Low
+        2. Repeated START
+        3. STOP
+
+        Args:
+            num_transitions: Number of SDA transitions (14 for valid pattern)
+            tdig_h_ns: Override timing for SDA transitions in nanoseconds.
+                       If None, uses the controller's default tdig_h.
+            t_start_hold_ns: Override hold time for START condition in nanoseconds.
+                             If None, uses tdig_h_ns or controller default.
+            t_stop_hold_ns: Override hold time for STOP condition in nanoseconds.
+                            If None, uses tdig_h_ns or controller default.
+        """
+        await self.take_bus_control()
+        self._state = I3cState.TARGET_RESET
+
+        # Use custom timing or fall back to controller's tdig_h
+        if tdig_h_ns is not None:
+            wait_time = Timer(tdig_h_ns, "ns")
+        else:
+            wait_time = self.tdig_h
+
+        t_start = Timer(t_start_hold_ns, "ns") if t_start_hold_ns else wait_time
+        t_stop = Timer(t_stop_hold_ns, "ns") if t_stop_hold_ns else wait_time
+
+        self.log_info(f"Sending target reset pattern with {num_transitions} SDA transitions")
+
+        # Start with SDA high, SCL low
+        sda = 1
+        self.sda = sda
+        self.scl = 0
+        await wait_time
+
+        # Generate SDA transitions while SCL is low
+        for _ in range(num_transitions):
+            sda = 0 if sda else 1
+            self.sda = sda
+            await wait_time
+
+        # Raise SCL and keep it high through START and STOP
+        await wait_time
+        self.scl = 1
+        await wait_time
+
+        # Send Repeated START (SDA falling while SCL high)
+        self.sda = 0
+        await t_start
+
+        # Send STOP (SDA rising while SCL high)
+        self.sda = 1
+        await t_stop
+
+        self.log_info("Target reset pattern complete")
+        self.give_bus_control()
+
+    async def send_target_reset_pattern_with_scl_glitch(
+        self,
+        glitch_at_transition: int = 7,
+        tdig_h_ns: Optional[float] = None,
+        glitch_on_sda_edge: bool = False,
+    ) -> None:
+        """
+        Send target reset pattern with SCL glitch during SDA transitions.
+
+        This should reset the transition counter and prevent reset detection.
+
+        Args:
+            glitch_at_transition: Which SDA transition to glitch SCL at (0-indexed)
+            tdig_h_ns: Override timing in nanoseconds. If None, uses controller default.
+        """
+        await self.take_bus_control()
+        self._state = I3cState.TARGET_RESET
+
+        if tdig_h_ns is not None:
+            wait_time = Timer(tdig_h_ns, "ns")
+            half_wait = Timer(tdig_h_ns / 2, "ns")
+        else:
+            wait_time = self.tdig_h
+            half_wait = Timer(self.timings.tdig_h / 2, "ns")
+
+        self.log_info(f"Sending pattern with SCL glitch at transition {glitch_at_transition}")
+
+        sda = 1
+        self.sda = sda
+        self.scl = 0
+        await wait_time
+
+        for i in range(14):
+            sda = 0 if sda else 1
+            self.sda = sda
+
+            # Inject SCL glitch
+            if i == glitch_at_transition:
+                if not glitch_on_sda_edge:
+                    await wait_time
+                self.scl = 1
+                await half_wait
+                self.scl = 0
+                await half_wait
+            else:
+                await wait_time
+
+        # Complete pattern normally
+        await wait_time
+        self.scl = 1
+        await wait_time
+
+        self.sda = 0
+        await wait_time
+
+        self.sda = 1
+        await wait_time
+
+        self.give_bus_control()
+
+    async def send_target_reset_pattern_with_sda_stable_low(
+        self,
+        tdig_h_ns: Optional[float] = None,
+    ) -> None:
+        """
+        Send 14 SDA transitions, but then SDA goes stable low before SCL rises.
+
+        This should cause FSM to return to AwaitPattern (abort).
+
+        Args:
+            tdig_h_ns: Override timing in nanoseconds. If None, uses controller default.
+        """
+        await self.take_bus_control()
+        self._state = I3cState.TARGET_RESET
+
+        if tdig_h_ns is not None:
+            wait_time = Timer(tdig_h_ns, "ns")
+        else:
+            wait_time = self.tdig_h
+
+        self.log_info("Sending pattern with SDA stable low during AwaitSCL")
+
+        sda = 1
+        self.sda = sda
+        self.scl = 0
+        await wait_time
+
+        for _ in range(14):
+            sda = 0 if sda else 1
+            self.sda = sda
+            await wait_time
+
+        # SDA should be high after 14 toggles, but force it low
+        self.sda = 0
+        await wait_time
+        await wait_time
+
+        # Now raise SCL - but FSM should have aborted
+        self.scl = 1
+        await wait_time
+
+        # Try to complete pattern anyway
+        self.sda = 0
+        await wait_time
+        self.sda = 1
+        await wait_time
+
+        self.give_bus_control()
+
+    async def send_target_reset_pattern_with_scl_drop_await_sr(
+        self,
+        tdig_h_ns: Optional[float] = None,
+    ) -> None:
+        """
+        Send valid 14 transitions, SCL rises, but then drops before START.
+
+        This tests the AwaitSr abort condition when SCL goes stable low.
+
+        Args:
+            tdig_h_ns: Override timing in nanoseconds. If None, uses controller default.
+        """
+        await self.take_bus_control()
+        self._state = I3cState.TARGET_RESET
+
+        if tdig_h_ns is not None:
+            wait_time = Timer(tdig_h_ns, "ns")
+            half_wait = Timer(tdig_h_ns / 2, "ns")
+        else:
+            wait_time = self.tdig_h
+            half_wait = Timer(self.timings.tdig_h / 2, "ns")
+
+        self.log_info("Sending pattern with SCL drop during AwaitSr")
+
+        sda = 1
+        self.sda = sda
+        self.scl = 0
+        await wait_time
+
+        for _ in range(14):
+            sda = 0 if sda else 1
+            self.sda = sda
+            await wait_time
+
+        await wait_time
+        self.scl = 1
+        await half_wait
+
+        # Drop SCL before START - this should abort AwaitSr
+        self.scl = 0
+        await wait_time
+
+        # FSM should have aborted, attempt to complete anyway
+        self.scl = 1
+        await wait_time
+        self.sda = 0
+        await wait_time
+        self.sda = 1
+        await wait_time
+
+        self.give_bus_control()
+
+    async def send_target_reset_pattern_with_scl_drop_await_p(
+        self,
+        tdig_h_ns: Optional[float] = None,
+        t_start_hold_ns: Optional[float] = None,
+    ) -> None:
+        """
+        Complete valid pattern through START, but SCL drops before STOP.
+
+        This tests the AwaitP abort condition when SCL goes stable low.
+        NOTE: SCL must drop BEFORE SDA rises, because STOP is detected on SDA rising edge.
+
+        Args:
+            tdig_h_ns: Override timing in nanoseconds. If None, uses controller default.
+            t_start_hold_ns: Override START hold time. If None, uses tdig_h_ns or default.
+        """
+        await self.take_bus_control()
+        self._state = I3cState.TARGET_RESET
+
+        if tdig_h_ns is not None:
+            wait_time = Timer(tdig_h_ns, "ns")
+        else:
+            wait_time = self.tdig_h
+
+        t_start = Timer(t_start_hold_ns, "ns") if t_start_hold_ns else wait_time
+
+        self.log_info("Sending pattern with SCL drop during AwaitP")
+
+        sda = 1
+        self.sda = sda
+        self.scl = 0
+        await wait_time
+
+        for _ in range(14):
+            sda = 0 if sda else 1
+            self.sda = sda
+            await wait_time
+
+        await wait_time
+        self.scl = 1
+        await wait_time
+
+        # Valid START - SDA falls while SCL high
+        self.sda = 0
+        await t_start
+
+        # Now in AwaitP, drop SCL BEFORE raising SDA
+        self.scl = 0
+        await wait_time
+
+        # Now raise SDA (but SCL is low, so no STOP detected)
+        self.sda = 1
+        await wait_time
+
+        # Return to idle
+        self.scl = 1
+        await wait_time
+
+        self.give_bus_control()
+
     async def set_bus_idle(self) -> None:
         """
         Set bus to idle state (both SDA and SCL high).
