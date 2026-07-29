@@ -1536,6 +1536,7 @@ class I3cController:
         stop: bool = True,
         mode: I3cXferMode = I3cXferMode.PRIVATE,
         inject_tbit_err: bool = False,
+        inject_tbit_err_on: Optional[int] = None,
         send_rsvd: bool = True,
         rstart: bool = False,
         take_bus_control: bool = True,
@@ -1557,7 +1558,8 @@ class I3cController:
                     for i, d in enumerate(data):
                         match mode:
                             case I3cXferMode.PRIVATE:
-                                await self.send_byte_tbit(d, inject_tbit_err)
+                                do_tbit_err = (i == inject_tbit_err_on) or inject_tbit_err
+                                await self.send_byte_tbit(d, do_tbit_err)
                             case I3cXferMode.LEGACY_I2C:
                                 await self.send_byte(d)
                         self.log_info(f"I3C: wrote byte {hex(d)}, idx={i}")

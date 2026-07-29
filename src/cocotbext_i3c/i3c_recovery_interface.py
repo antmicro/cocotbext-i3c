@@ -142,6 +142,7 @@ class I3cRecoveryInterface:
         stop=True,
         start=True,
         rstart=False,
+        claimed_length=None,
     ):
         """
         Issues a write command to the target
@@ -150,11 +151,15 @@ class I3cRecoveryInterface:
         if not data:
             data = []
 
+        length = len(data)
+        if claimed_length is not None:
+            length = claimed_length
+
         # Header
         xfer = [
             command,
-            len(data) & 0xFF,
-            (len(data) >> 8) & 0xFF,
+            length & 0xFF,
+            (length >> 8) & 0xFF,
         ]
 
         # Data
