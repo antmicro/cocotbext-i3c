@@ -6,7 +6,6 @@ import random
 import crc
 from cocotb.triggers import Timer
 
-from .common import I3C_RSVD_BYTE
 from .i3c_controller import I3cController
 
 
@@ -70,22 +69,12 @@ class I3cRecoveryInterface:
             if r != pec:
                 return r
 
-    async def _i3c_recovery_read(self, address):
+    async def _i3c_recovery_read(self, address, send_stop=True):
         """
         Issues a private read using low-level functions of the controller
         adapter. This is needed as the length of data to be received is
         contained in the first two bytes of the packet
         """
-
-        # Begin I3C read
-        await self.controller.take_bus_control()
-
-        await self.controller.send_start()
-        ack = await self.controller.write_addr_header(I3C_RSVD_BYTE)
-        if not ack:
-            await self.controller.send_stop()
-            self.controller.give_bus_control()
-            return None, None
 
         await self.controller.send_start()
         ack = await self.controller.write_addr_header(address, read=True)
@@ -96,7 +85,6 @@ class I3cRecoveryInterface:
 
         # Begin reception
         try:
-
             # Read length
             len_bytes = []
             for i in range(2):
@@ -135,8 +123,9 @@ class I3cRecoveryInterface:
             await Timer(1, "us")
             raise
 
-        await self.controller.send_stop()
-        self.controller.give_bus_control()
+        if send_stop:
+            await self.controller.send_stop()
+            self.controller.give_bus_control()
 
         # Compute reference PEC checksum
         pec_calc = int(self.pec_calc.checksum(bytes([(address << 1) | 1] + len_bytes + data)))
