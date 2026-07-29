@@ -144,6 +144,7 @@ class I3cRecoveryInterface:
         rstart=False,
         claimed_length=None,
         abort_after_bytes=None,
+        error_byte_index=None,
     ):
         """
         Issues a write command to the target
@@ -180,10 +181,18 @@ class I3cRecoveryInterface:
 
         # Do the I3C write transfer using the controller functionality
         await self.controller.i3c_write(
-            address, xfer, stop=stop, send_rsvd=start, rstart=rstart, take_bus_control=start
+            address,
+            xfer,
+            stop=stop,
+            send_rsvd=start,
+            rstart=rstart,
+            take_bus_control=start,
+            inject_tbit_err_on=error_byte_index,
         )
 
-    async def command_read(self, address, command, force_pec_error=False, stop=True, start=True):
+    async def command_read(
+        self, address, command, force_pec_error=False, stop=True, start=True, error_byte_index=None
+    ):
         """
         Issues a read command to the target
         """
@@ -201,7 +210,9 @@ class I3cRecoveryInterface:
         xfer.append(pec)
 
         # Do the I3C write transfer, do not terminate with stop
-        await self.controller.i3c_write(address, xfer, stop=False, send_rsvd=start)
+        await self.controller.i3c_write(
+            address, xfer, stop=False, send_rsvd=start, inject_tbit_err_on=error_byte_index
+        )
 
         # Do the I3C read transfer. Return the results.
         return await self._i3c_recovery_read(address, send_stop=stop)
