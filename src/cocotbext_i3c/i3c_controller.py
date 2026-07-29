@@ -1537,9 +1537,12 @@ class I3cController:
         mode: I3cXferMode = I3cXferMode.PRIVATE,
         inject_tbit_err: bool = False,
         send_rsvd: bool = True,
+        rstart: bool = False,
+        take_bus_control: bool = True,
     ) -> I3cPWResp:
         """I3C Private Write transfer"""
-        await self.take_bus_control()
+        if take_bus_control:
+            await self.take_bus_control()
         self.log_info(f"I3C: Write data ({mode.name}) {data} @ {hex(addr)}")
 
         for retry in range(MAX_IBI_RETRIES):
@@ -1559,7 +1562,9 @@ class I3cController:
                                 await self.send_byte(d)
                         self.log_info(f"I3C: wrote byte {hex(d)}, idx={i}")
 
-                if stop:
+                if rstart:
+                    await self.send_start()
+                elif stop:
                     await self.send_stop()
 
                 self.give_bus_control()

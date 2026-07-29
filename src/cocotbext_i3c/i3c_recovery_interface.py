@@ -133,7 +133,16 @@ class I3cRecoveryInterface:
         # Return the data and received PEC validity
         return data, (pec_recv == pec_calc)
 
-    async def command_write(self, address, command, data=None, force_pec_error=False):
+    async def command_write(
+        self,
+        address,
+        command,
+        data=None,
+        force_pec_error=False,
+        stop=True,
+        start=True,
+        rstart=False,
+    ):
         """
         Issues a write command to the target
         """
@@ -161,9 +170,11 @@ class I3cRecoveryInterface:
         xfer.append(pec)
 
         # Do the I3C write transfer using the controller functionality
-        await self.controller.i3c_write(address, xfer)
+        await self.controller.i3c_write(
+            address, xfer, stop=stop, send_rsvd=start, rstart=rstart, take_bus_control=start
+        )
 
-    async def command_read(self, address, command, force_pec_error=False):
+    async def command_read(self, address, command, force_pec_error=False, stop=True, start=True):
         """
         Issues a read command to the target
         """
@@ -181,7 +192,7 @@ class I3cRecoveryInterface:
         xfer.append(pec)
 
         # Do the I3C write transfer, do not terminate with stop
-        await self.controller.i3c_write(address, xfer, stop=False)
+        await self.controller.i3c_write(address, xfer, stop=False, send_rsvd=start)
 
         # Do the I3C read transfer. Return the results.
-        return await self._i3c_recovery_read(address)
+        return await self._i3c_recovery_read(address, send_stop=stop)
