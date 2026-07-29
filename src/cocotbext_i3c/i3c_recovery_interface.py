@@ -143,6 +143,7 @@ class I3cRecoveryInterface:
         start=True,
         rstart=False,
         claimed_length=None,
+        abort_after_bytes=None,
     ):
         """
         Issues a write command to the target
@@ -173,6 +174,9 @@ class I3cRecoveryInterface:
             pec = self._randomize_pec(pec)
 
         xfer.append(pec)
+
+        if abort_after_bytes is not None:
+            xfer = xfer[:abort_after_bytes]
 
         # Do the I3C write transfer using the controller functionality
         await self.controller.i3c_write(
