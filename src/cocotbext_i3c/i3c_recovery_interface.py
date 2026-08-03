@@ -139,6 +139,7 @@ class I3cRecoveryInterface:
         command,
         data=None,
         force_pec_error=False,
+        skip_pec=False,
         stop=True,
         start=True,
         rstart=False,
@@ -174,7 +175,8 @@ class I3cRecoveryInterface:
         if force_pec_error:
             pec = self._randomize_pec(pec)
 
-        xfer.append(pec)
+        if not skip_pec:
+            xfer.append(pec)
 
         if abort_after_bytes is not None:
             xfer = xfer[:abort_after_bytes]
