@@ -69,7 +69,7 @@ class I3cRecoveryInterface:
             if r != pec:
                 return r
 
-    async def _i3c_recovery_read(self, address, send_stop=True):
+    async def _i3c_recovery_read(self, address, send_stop=True, abort_after_bytes=None):
         """
         Issues a private read using low-level functions of the controller
         adapter. This is needed as the length of data to be received is
@@ -88,15 +88,21 @@ class I3cRecoveryInterface:
             # Read length
             len_bytes = []
             for i in range(2):
-                byte, stop = await self.controller.recv_byte_t_bit(stop=False)
+                abort_here = abort_after_bytes is not None and i == abort_after_bytes - 1
+                byte, stop = await self.controller.recv_byte_t_bit(stop=abort_here)
                 len_bytes.append(byte)
                 self.log.debug(f"Recovery Rx: byte[{i}]: 0x{byte:02X} (stop={int(stop)})")
 
                 # Length is mandatory. If the transfer gets terminated raise an
                 # exception.
-                if stop:
+                if stop and not abort_here:
                     self.log.error(f"Target requested stop at byte {i}")
                     raise I3cRecoveryException
+                elif stop:
+                    if send_stop:
+                        await self.controller.send_stop(pull_scl_low=False)
+                        self.controller.give_bus_control()
+                    return
 
             length = (len_bytes[1] << 8) | len_bytes[0]
             self.log.debug(f"Recovery Rx: Payload length is {length}B")
@@ -104,13 +110,19 @@ class I3cRecoveryInterface:
             # Read data. Raise an exception in case of an unexpected stop
             data = []
             for i in range(length):
-                byte, stop = await self.controller.recv_byte_t_bit(stop=False)
+                abort_here = abort_after_bytes is not None and i + 2 == abort_after_bytes - 1
+                byte, stop = await self.controller.recv_byte_t_bit(stop=abort_here)
                 data.append(byte)
                 self.log.debug(f"Recovery Rx: byte[{i + 2}]: 0x{byte:02X} (stop={int(stop)})")
 
-                if stop:
+                if stop and not abort_here:
                     self.log.error(f"Target requested stop at byte {i + 2}")
                     raise I3cRecoveryException
+                elif stop:
+                    if send_stop:
+                        await self.controller.send_stop(pull_scl_low=False)
+                        self.controller.give_bus_control()
+                    return
 
             # Read PEC. Expect stop at this byte
             pec_recv, stop = await self.controller.recv_byte_t_bit(stop=True)
@@ -124,7 +136,7 @@ class I3cRecoveryInterface:
             raise
 
         if send_stop:
-            await self.controller.send_stop()
+            await self.controller.send_stop(pull_scl_low=abort_after_bytes is not None)
             self.controller.give_bus_control()
 
         # Compute reference PEC checksum
@@ -196,7 +208,14 @@ class I3cRecoveryInterface:
         )
 
     async def command_read(
-        self, address, command, force_pec_error=False, stop=True, start=True, error_byte_index=None
+        self,
+        address,
+        command,
+        force_pec_error=False,
+        stop=True,
+        start=True,
+        error_byte_index=None,
+        abort_after_bytes=None,
     ):
         """
         Issues a read command to the target
@@ -220,4 +239,6 @@ class I3cRecoveryInterface:
         )
 
         # Do the I3C read transfer. Return the results.
-        return await self._i3c_recovery_read(address, send_stop=stop)
+        return await self._i3c_recovery_read(
+            address, send_stop=stop, abort_after_bytes=abort_after_bytes
+        )
