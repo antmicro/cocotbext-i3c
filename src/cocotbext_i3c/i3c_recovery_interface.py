@@ -3,6 +3,7 @@
 import logging
 import random
 
+import cocotb
 import crc
 from cocotb.triggers import Timer
 
@@ -145,6 +146,27 @@ class I3cRecoveryInterface:
         # Return the data and received PEC validity
         return data, (pec_recv == pec_calc)
 
+    def _debug_pec(self, address, xfer):
+        data = [address << 1] + xfer
+        cocotb.log.info("=== PEC DEBUG ===")
+        # Show cumulative PEC after each byte
+        cumulative_pec = 0
+        for i, byte in enumerate(data):
+            cumulative_pec = int(self.pec_calc.checksum(bytes(data[: i + 1])))
+            if i == 0:
+                label = "ADDR"
+            elif i == 1:
+                label = "CMD"
+            elif i == 2:
+                label = "LEN_L"
+            elif i == 3:
+                label = "LEN_H"
+            else:
+                label = f"DATA[{i-4}]"
+            cocotb.log.info(f"  Byte {i}: {label}=0x{byte:02X} -> PEC=0x{cumulative_pec:02X}")
+        cocotb.log.info(f"  Final PEC: 0x{cumulative_pec:02X}")
+        cocotb.log.info("=================================")
+
     async def command_write(
         self,
         address,
@@ -159,6 +181,7 @@ class I3cRecoveryInterface:
         claimed_length=None,
         abort_after_bytes=None,
         error_byte_index=None,
+        debug_pec=True,
     ):
         """
         Issues a write command to the target
@@ -175,6 +198,7 @@ class I3cRecoveryInterface:
         :param claimed_length: Length of data to be reported instead of actual length
         :param abort_after_bytes: Terminate the write after this many bytes have been transferred
         :param error_byte_index: Inject a t-bit error on this byte
+        :param debug_pec: Log debug information about the PEC computation
         """
 
         if not data:
@@ -196,6 +220,8 @@ class I3cRecoveryInterface:
 
         # Compute PEC
         pec = int(self.pec_calc.checksum(bytes([address << 1] + xfer)))
+        if debug_pec:
+            self._debug_pec(address, xfer)
 
         # Inject incorrect PEC
         if force_pec_error:
@@ -229,6 +255,7 @@ class I3cRecoveryInterface:
         start=True,
         error_byte_index=None,
         abort_after_bytes=None,
+        debug_pec=True,
     ):
         """
         Issues a read command to the target
@@ -240,6 +267,7 @@ class I3cRecoveryInterface:
         :param start: Send a start before the write
         :param error_byte_index: Inject a t-bit error on this byte of the command
         :param abort_after_bytes: Terminate the read after this many bytes have been received
+        :param debug_pec: Log debug information about the PEC computation
         """
 
         # Header
@@ -247,6 +275,8 @@ class I3cRecoveryInterface:
 
         # Compute PEC
         pec = int(self.pec_calc.checksum(bytes([address << 1] + xfer)))
+        if debug_pec:
+            self._debug_pec(address, xfer)
 
         # Inject incorrect PEC
         if force_pec_error:
