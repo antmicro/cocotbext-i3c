@@ -162,6 +162,19 @@ class I3cRecoveryInterface:
     ):
         """
         Issues a write command to the target
+
+        :param address: I3C device address to send command to
+        :param command: Command to send
+        :param data: Additional data to send
+        :param force_pec_error: Force the sent PEC to be incorrect
+        :param skip_pec: Skip sending PEC after the command
+        :param extra_pec_bytes: Add extra random bytes after PEC
+        :param stop: Send a stop after the write
+        :param start: Send a start before the write
+        :param rstart: Send a start after the write instead of stop
+        :param claimed_length: Length of data to be reported instead of actual length
+        :param abort_after_bytes: Terminate the write after this many bytes have been transferred
+        :param error_byte_index: Inject a t-bit error on this byte
         """
 
         if not data:
@@ -219,6 +232,14 @@ class I3cRecoveryInterface:
     ):
         """
         Issues a read command to the target
+
+        :param address: I3C device address to send command to
+        :param command: Command to send
+        :param force_pec_error: Force the sent PEC to be incorrect
+        :param stop: Send a stop after the write
+        :param start: Send a start before the write
+        :param error_byte_index: Inject a t-bit error on this byte of the command
+        :param abort_after_bytes: Terminate the read after this many bytes have been received
         """
 
         # Header
