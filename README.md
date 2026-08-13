@@ -1,4 +1,4 @@
-###### Copyright (C) 2024 Antmicro
+###### Copyright (C) 2024-2026 Antmicro
 
 # cocotbext-i3c
 
